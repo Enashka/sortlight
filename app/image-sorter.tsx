@@ -17,7 +17,9 @@ import {
   SortableImage,
   storedImageKey,
 } from "./sorting";
-import { loadDirectoryHandles, saveDirectoryHandles } from "./folder-store";
+import { pickDirectory, supportsDirectoryPicker } from "./browser-files.mjs";
+import { filmstripRange } from "./filmstrip.mjs";
+import { toggledTag } from "./tagging.mjs";
 
 type DirectoryPickerWindow = Window & {
   showDirectoryPicker?: (options?: {
@@ -39,7 +41,7 @@ type Filter = "all" | "untagged" | string;
 type Notice = { tone: "success" | "warning" | "error"; text: string } | null;
 
 const DESTINATIONS_KEY = "sortlight:destinations:v2";
-const AUTO_ADVANCE_KEY = "sortlight:auto-advance:v1";
+const AUTO_ADVANCE_KEY = "sortlight:auto-advance:v2";
 const TAGS_KEY_PREFIX = "sortlight:tags:v1:";
 
 function savedDestinations() {
@@ -54,12 +56,24 @@ function savedDestinations() {
 }
 
 function savedAutoAdvance() {
-  if (typeof window === "undefined") return true;
+  if (typeof window === "undefined") return false;
   try {
-    return window.localStorage.getItem(AUTO_ADVANCE_KEY) !== "false";
+    return window.localStorage.getItem(AUTO_ADVANCE_KEY) === "true";
   } catch {
-    return true;
+    return false;
   }
+}
+
+function folderPickerError(error: unknown) {
+  if (error instanceof DOMException) {
+    if (error.name === "SecurityError") {
+      return "Chrome blocked folder access here. Open Sortlight in a regular tab at localhost or over HTTPS.";
+    }
+    if (error.name === "NotAllowedError") {
+      return "Chrome did not grant access to that folder. Try again and approve the folder prompt.";
+    }
+  }
+  return "That folder could not be opened. Check its permissions and try again.";
 }
 
 function bytesToSize(bytes: number) {
@@ -72,7 +86,6 @@ function makeDestination(): Destination {
   return {
     id: `destination-${Date.now()}`,
     label: "New tag",
-    folder: "",
     shortcut: "",
     color: "#9f8cff",
   };
@@ -109,7 +122,6 @@ export function ImageSorter() {
   const [folderName, setFolderName] = useState("");
   const [sourceDirectoryHandle, setSourceDirectoryHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [destinations, setDestinations] = useState<Destination[]>(savedDestinations);
-  const [directoryHandles, setDirectoryHandles] = useState<Map<string, FileSystemDirectoryHandle>>(new Map());
   const [currentIndex, setCurrentIndex] = useState(0);
   const [filter, setFilter] = useState<Filter>("all");
   const [autoAdvance, setAutoAdvance] = useState(savedAutoAdvance);
@@ -123,25 +135,12 @@ export function ImageSorter() {
   const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageStageRef = useRef<HTMLDivElement>(null);
+  const currentThumbnailRef = useRef<HTMLButtonElement>(null);
   const objectUrlsRef = useRef<string[]>([]);
 
   useEffect(() => {
     return () => objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
-
-  useEffect(() => {
-    let cancelled = false;
-    void loadDirectoryHandles(destinations.map((destination) => destination.id))
-      .then((handles) => {
-        if (!cancelled) setDirectoryHandles(handles);
-      })
-      .catch(() => {
-        // Folder handles are a convenience. The user can always select them again.
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [destinations]);
 
   const visibleImages = useMemo(() => {
     if (filter === "all") return images;
@@ -151,17 +150,19 @@ export function ImageSorter() {
 
   const safeIndex = Math.min(currentIndex, Math.max(visibleImages.length - 1, 0));
   const currentImage = visibleImages[safeIndex];
+  const visibleFilmstripRange = filmstripRange(visibleImages.length, safeIndex);
+  const filmstripImages = visibleImages.slice(
+    visibleFilmstripRange.start,
+    visibleFilmstripRange.end,
+  );
   const taggedCount = images.filter((image) => image.tagId).length;
   const untaggedCount = images.length - taggedCount;
-  const taggedDestinationIds = new Set(
-    images.flatMap((image) => (image.tagId ? [image.tagId] : [])),
-  );
-  const missingDestinationCount = [...taggedDestinationIds].filter(
-    (id) => !directoryHandles.has(id),
-  ).length;
   const folderPickerSupported =
-    typeof window !== "undefined" &&
-    Boolean((window as DirectoryPickerWindow).showDirectoryPicker);
+    typeof window !== "undefined" && supportsDirectoryPicker(window as DirectoryPickerWindow);
+
+  useEffect(() => {
+    currentThumbnailRef.current?.scrollIntoView({ block: "nearest" });
+  }, [currentImage?.id]);
 
   const rememberTags = useCallback(
     (nextImages: SortableImage[]) => {
@@ -232,14 +233,16 @@ export function ImageSorter() {
   );
 
   const openFolder = useCallback(async () => {
-    const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
-    if (!picker) {
+    if (!supportsDirectoryPicker(window as DirectoryPickerWindow)) {
       fileInputRef.current?.click();
       return;
     }
 
     try {
-      const directory = await picker({ id: "sortlight-source", mode: "read" });
+      const directory = await pickDirectory(window as DirectoryPickerWindow, {
+        id: "sortlight-source",
+        mode: "read",
+      });
       const files: Array<{ file: File; handle: FileSystemFileHandle }> = [];
       for await (const entry of (directory as IterableDirectoryHandle).values()) {
         if (entry.kind !== "file") continue;
@@ -252,7 +255,7 @@ export function ImageSorter() {
       if (error instanceof DOMException && error.name === "AbortError") return;
       setNotice({
         tone: "error",
-        text: "The folder could not be opened. Check its permissions and try again.",
+        text: folderPickerError(error),
       });
     }
   }, [loadFiles]);
@@ -283,14 +286,15 @@ export function ImageSorter() {
   const applyTag = useCallback(
     (tagId: string | null) => {
       if (!currentImage) return;
+      const nextTagId = toggledTag(currentImage.tagId, tagId);
       const nextImages = images.map((image) =>
         image.id === currentImage.id
-          ? { ...image, tagId: image.tagId === tagId ? null : tagId }
+          ? { ...image, tagId: nextTagId }
           : image,
       );
       setImages(nextImages);
       rememberTags(nextImages);
-      if (autoAdvance && safeIndex < visibleImages.length - 1) {
+      if (autoAdvance && nextTagId && safeIndex < visibleImages.length - 1) {
         setCurrentIndex(safeIndex + 1);
       }
     },
@@ -355,15 +359,12 @@ export function ImageSorter() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [applyTag, confirmOpen, destinations, helpOpen, moveBy, settingsOpen, toggleFullscreen]);
 
-  const saveDestinations = async (
-    nextDestinations: Destination[],
-    nextHandles: Map<string, FileSystemDirectoryHandle>,
-  ) => {
+  const saveDestinations = (nextDestinations: Destination[]) => {
     const normalized = nextDestinations.map((destination) => ({
-      ...destination,
+      id: destination.id,
       label: destination.label.trim(),
-      folder: nextHandles.get(destination.id)?.name ?? destination.folder,
       shortcut: destination.shortcut.toLowerCase().trim(),
+      color: destination.color,
     }));
     const shortcuts = normalized.map((item) => item.shortcut).filter(Boolean);
     const valid = normalized.every(
@@ -377,14 +378,7 @@ export function ImageSorter() {
       return;
     }
     const destinationIds = new Set(normalized.map((item) => item.id));
-    let handlesPersisted = true;
-    try {
-      await saveDirectoryHandles(nextHandles, destinationIds);
-    } catch {
-      handlesPersisted = false;
-    }
     setDestinations(normalized);
-    setDirectoryHandles(new Map(nextHandles));
     setImages((items) =>
       items.map((image) =>
         image.tagId && !destinationIds.has(image.tagId) ? { ...image, tagId: null } : image,
@@ -396,32 +390,25 @@ export function ImageSorter() {
     }
     window.localStorage.setItem(DESTINATIONS_KEY, JSON.stringify(normalized));
     setSettingsOpen(false);
-    setNotice(
-      handlesPersisted
-        ? { tone: "success", text: "Tags, shortcuts, and destination folders saved." }
-        : { tone: "warning", text: "The tags were saved, but this browser may ask you to choose destination folders again." },
-    );
+    setNotice({ tone: "success", text: "Tags and shortcuts saved." });
   };
 
-  const copyImages = async () => {
+  const copyImages = async (exportHandles: Map<string, FileSystemDirectoryHandle>) => {
     setIsSorting(true);
     setNotice(null);
     const successfulIds = new Set<string>();
     const failures: string[] = [];
-    const permissionByDestination = new Map<string, boolean>();
+    const permissionByTag = new Map<string, boolean>();
 
     for (const image of images.filter((item) => item.tagId)) {
-      const destination = destinations.find((item) => item.id === image.tagId);
-      const directory = image.tagId ? directoryHandles.get(image.tagId) : null;
-      if (!destination || !directory) {
-        failures.push(image.name);
-        continue;
-      }
       try {
-        let hasPermission = permissionByDestination.get(destination.id);
+        const tagId = image.tagId;
+        const directory = tagId ? exportHandles.get(tagId) : null;
+        if (!tagId || !directory) throw new Error("Export folder is missing");
+        let hasPermission = permissionByTag.get(tagId);
         if (hasPermission === undefined) {
           hasPermission = await ensureWritePermission(directory);
-          permissionByDestination.set(destination.id, hasPermission);
+          permissionByTag.set(tagId, hasPermission);
         }
         if (!hasPermission) throw new Error("Destination permission was not granted");
         const sourceFile = image.handle ? await image.handle.getFile() : image.file;
@@ -502,8 +489,8 @@ export function ImageSorter() {
         <section className="welcome-content" id="top">
           <h1>Image sorter</h1>
           <p className="welcome-copy">
-            Open a local folder, assign up to nine keyboard tags, choose a destination
-            folder for each tag, and copy the selected images.
+            Open a local folder, sort images with up to nine keyboard tags, then choose
+            destination folders when you export.
           </p>
           <div className="welcome-actions">
             <button className="primary-button large" type="button" onClick={() => void openFolder()}>
@@ -571,22 +558,19 @@ export function ImageSorter() {
             onClick={() => {
               if (!folderPickerSupported) {
                 setNotice({ tone: "error", text: "Copying to folders requires desktop Chrome, Chromium, or Edge." });
-              } else if (missingDestinationCount) {
-                setNotice({ tone: "warning", text: "Choose a destination folder for every tag currently in use." });
-                setSettingsOpen(true);
               } else {
                 setConfirmOpen(true);
               }
             }}
           >
-            Copy {taggedCount} images
+            Export {taggedCount} images
           </button>
         </div>
       </header>
 
       <aside className="tag-sidebar">
         <div className="sidebar-heading">
-          <span>DESTINATIONS</span>
+          <span>TAGS</span>
           <button type="button" onClick={() => setSettingsOpen(true)}>Manage up to 9</button>
         </div>
         <button
@@ -611,7 +595,7 @@ export function ImageSorter() {
               className={`filter-row tag-filter${filter === destination.id ? " active" : ""}`}
               type="button"
               key={destination.id}
-              title={`${destination.label} → ${directoryHandles.get(destination.id)?.name ?? "Choose a folder"}`}
+              title={destination.label}
               onClick={() => { setFilter(destination.id); setCurrentIndex(0); }}
             >
               <span className="color-dot" style={{ background: destination.color }} />
@@ -702,13 +686,15 @@ export function ImageSorter() {
       </section>
 
       <aside className="filmstrip" aria-label="Image filmstrip">
-        {visibleImages.map((image, index) => {
+        {filmstripImages.map((image, windowIndex) => {
+          const index = visibleFilmstripRange.start + windowIndex;
           const tag = destinations.find((destination) => destination.id === image.tagId);
           return (
             <button
               className={index === safeIndex ? "active" : ""}
               type="button"
               key={image.id}
+              ref={index === safeIndex ? currentThumbnailRef : undefined}
               title={image.name}
               onClick={() => setCurrentIndex(index)}
             >
@@ -735,9 +721,6 @@ export function ImageSorter() {
       {settingsOpen && (
         <SettingsDialog
           destinations={destinations}
-          directoryHandles={directoryHandles}
-          sourceDirectoryHandle={sourceDirectoryHandle}
-          folderPickerSupported={folderPickerSupported}
           onCancel={() => setSettingsOpen(false)}
           onSave={saveDestinations}
         />
@@ -745,11 +728,11 @@ export function ImageSorter() {
       {confirmOpen && (
         <ConfirmDialog
           destinations={destinations}
-          directoryHandles={directoryHandles}
           images={images}
           isSorting={isSorting}
+          sourceDirectoryHandle={sourceDirectoryHandle}
           onCancel={() => !isSorting && setConfirmOpen(false)}
-          onConfirm={() => void copyImages()}
+          onConfirm={(handles) => void copyImages(handles)}
         />
       )}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
@@ -773,20 +756,12 @@ function DialogFrame({ title, subtitle, children, onClose }: { title: string; su
   );
 }
 
-function SettingsDialog({ destinations, directoryHandles, sourceDirectoryHandle, folderPickerSupported, onCancel, onSave }: {
+function SettingsDialog({ destinations, onCancel, onSave }: {
   destinations: Destination[];
-  directoryHandles: Map<string, FileSystemDirectoryHandle>;
-  sourceDirectoryHandle: FileSystemDirectoryHandle | null;
-  folderPickerSupported: boolean;
   onCancel: () => void;
-  onSave: (
-    destinations: Destination[],
-    handles: Map<string, FileSystemDirectoryHandle>,
-  ) => void | Promise<void>;
+  onSave: (destinations: Destination[]) => void | Promise<void>;
 }) {
   const [draft, setDraft] = useState(destinations);
-  const [draftHandles, setDraftHandles] = useState(() => new Map(directoryHandles));
-  const [pickerError, setPickerError] = useState("");
   const updateDestination = (id: string, patch: Partial<Destination>) => {
     setDraft((items) =>
       items.map((item) => (item.id === id ? { ...item, ...patch } : item)),
@@ -799,69 +774,77 @@ function SettingsDialog({ destinations, directoryHandles, sourceDirectoryHandle,
       updateDestination(id, { shortcut: event.key.toLowerCase() });
     }
   };
-  const chooseFolder = async (id: string) => {
-    const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
-    if (!picker) return;
-    try {
-      const handle = await picker({ id: `sortlight-destination-${id}`, mode: "readwrite" });
-      if (sourceDirectoryHandle && await handle.isSameEntry(sourceDirectoryHandle)) {
-        setPickerError("Choose a destination folder different from the source folder.");
-        return;
-      }
-      setDraftHandles((handles) => new Map(handles).set(id, handle));
-      updateDestination(id, { folder: handle.name });
-      setPickerError("");
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      setPickerError("That folder could not be opened. Check its permissions and try again.");
-    }
-  };
   return (
-    <DialogFrame title="Tags, shortcuts & folders" subtitle="Rename any tag, choose its folder, and create up to nine." onClose={onCancel}>
-      <div className="settings-labels"><span>Color & tag</span><span>Destination folder</span><span>Key</span><span /></div>
+    <DialogFrame title="Tags & shortcuts" subtitle="Rename tags, assign keys, and create up to nine." onClose={onCancel}>
+      <div className="settings-labels"><span>Color & tag</span><span>Key</span><span /></div>
       <div className="destination-editor">
         {draft.map((destination) => (
           <div className="destination-edit-row" key={destination.id}>
             <input className="color-input" type="color" value={destination.color} onChange={(event) => updateDestination(destination.id, { color: event.target.value })} aria-label={`${destination.label} color`} />
             <input value={destination.label} onChange={(event) => updateDestination(destination.id, { label: event.target.value })} aria-label="Tag name" />
-            <button className={`folder-picker${draftHandles.has(destination.id) ? " selected" : ""}`} type="button" disabled={!folderPickerSupported} onClick={() => void chooseFolder(destination.id)}>
-              <span>{draftHandles.get(destination.id)?.name || destination.folder || "Choose folder"}</span><b>Choose</b>
-            </button>
             <input className="shortcut-input" value={destination.shortcut} maxLength={1} onKeyDown={(event) => restrictShortcut(event, destination.id)} onChange={(event) => updateDestination(destination.id, { shortcut: event.target.value.replace(/[^a-z0-9]/gi, "").slice(0, 1) })} aria-label="Shortcut key" />
-            <button className="remove-row" type="button" onClick={() => { setDraft((items) => items.filter((item) => item.id !== destination.id)); setDraftHandles((handles) => { const next = new Map(handles); next.delete(destination.id); return next; }); }} aria-label={`Remove ${destination.label}`}>×</button>
+            <button className="remove-row" type="button" onClick={() => setDraft((items) => items.filter((item) => item.id !== destination.id))} aria-label={`Remove ${destination.label}`}>×</button>
           </div>
         ))}
       </div>
-      {pickerError && <p className="settings-error" role="alert">{pickerError}</p>}
-      {!folderPickerSupported && <p className="settings-error">Choosing destination folders requires desktop Chrome, Chromium, or Edge.</p>}
       <button className="add-destination" type="button" disabled={draft.length >= 9} onClick={() => setDraft((items) => [...items, makeDestination()])}>＋ Add tag <span>{draft.length} / 9</span></button>
-      <div className="dialog-actions"><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" onClick={() => void onSave(draft, draftHandles)}>Save tags & folders</button></div>
+      <div className="dialog-actions"><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" onClick={() => void onSave(draft)}>Save tags</button></div>
     </DialogFrame>
   );
 }
 
-function ConfirmDialog({ destinations, directoryHandles, images, isSorting, onCancel, onConfirm }: {
+function ConfirmDialog({ destinations, images, isSorting, sourceDirectoryHandle, onCancel, onConfirm }: {
   destinations: Destination[];
-  directoryHandles: Map<string, FileSystemDirectoryHandle>;
   images: SortableImage[];
   isSorting: boolean;
+  sourceDirectoryHandle: FileSystemDirectoryHandle | null;
   onCancel: () => void;
-  onConfirm: () => void;
+  onConfirm: (handles: Map<string, FileSystemDirectoryHandle>) => void;
 }) {
+  const [draftHandles, setDraftHandles] = useState<Map<string, FileSystemDirectoryHandle>>(
+    () => new Map(),
+  );
+  const [pickerError, setPickerError] = useState("");
   const groups = destinations.map((destination) => ({
     destination,
     count: images.filter((image) => image.tagId === destination.id).length,
   })).filter((group) => group.count);
   const total = groups.reduce((sum, group) => sum + group.count, 0);
+  const missingFolder = groups.some(({ destination }) => !draftHandles.has(destination.id));
+  const chooseFolder = async (id: string) => {
+    try {
+      const handle = await pickDirectory(window as DirectoryPickerWindow, {
+        id: `sortlight-export-${id}`,
+        mode: "readwrite",
+      });
+      if (sourceDirectoryHandle && await handle.isSameEntry(sourceDirectoryHandle)) {
+        setPickerError("Choose an export folder different from the source folder.");
+        return;
+      }
+      setDraftHandles((handles) => new Map(handles).set(id, handle));
+      setPickerError("");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setPickerError(folderPickerError(error));
+    }
+  };
   return (
-    <DialogFrame title={`Copy ${total} images?`} subtitle="A verified copy goes to each chosen folder. Every original stays where it is." onClose={onCancel}>
+    <DialogFrame title={`Export ${total} images`} subtitle="Choose one destination folder for each tag used in this batch." onClose={onCancel}>
       <div className="sort-summary">
         {groups.map(({ destination, count }) => (
-          <div key={destination.id}><span className="color-dot" style={{ background: destination.color }} /><strong>{count} {count === 1 ? "image" : "images"}</strong><span>→</span><code>{directoryHandles.get(destination.id)?.name}</code></div>
+          <div key={destination.id}>
+            <span className="color-dot" style={{ background: destination.color }} />
+            <span className="export-group"><strong>{destination.label}</strong><small>{count} {count === 1 ? "image" : "images"}</small></span>
+            <button className={`folder-picker${draftHandles.has(destination.id) ? " selected" : ""}`} type="button" disabled={isSorting} onClick={() => void chooseFolder(destination.id)}>
+              <span>{draftHandles.get(destination.id)?.name ?? "Choose destination"}</span><b>{draftHandles.has(destination.id) ? "Change" : "Choose"}</b>
+            </button>
+          </div>
         ))}
       </div>
+      {pickerError && <p className="settings-error" role="alert">{pickerError}</p>}
+      {missingFolder && !pickerError && <p className="settings-error">Choose a destination folder for every tag in this batch.</p>}
       <div className="safety-note"><span>✓</span><p><strong>Originals stay untouched</strong>Every copy is verified by file size. Existing names receive a numbered suffix.</p></div>
-      <div className="dialog-actions"><button className="secondary-button" type="button" disabled={isSorting} onClick={onCancel}>Keep reviewing</button><button className="primary-button" type="button" disabled={isSorting} onClick={onConfirm}>{isSorting ? "Copying…" : "Copy images"}</button></div>
+      <div className="dialog-actions"><button className="secondary-button" type="button" disabled={isSorting} onClick={onCancel}>Keep reviewing</button><button className="primary-button" type="button" disabled={isSorting || missingFolder} onClick={() => onConfirm(draftHandles)}>{isSorting ? "Copying…" : "Export copies"}</button></div>
     </DialogFrame>
   );
 }
@@ -870,7 +853,7 @@ function HelpDialog({ onClose }: { onClose: () => void }) {
   return (
     <DialogFrame title="Keyboard guide" subtitle="Keep your hands on the keyboard and move quickly." onClose={onClose}>
       <div className="help-grid">
-        <div><kbd>1–9</kbd><span><strong>Apply a tag</strong>Keys follow your shortcut settings.</span></div>
+        <div><kbd>1–9</kbd><span><strong>Toggle a tag</strong>Press the same shortcut again to remove it.</span></div>
         <div><kbd>0</kbd><span><strong>Clear a tag</strong>Return the image to untagged.</span></div>
         <div><kbd>← →</kbd><span><strong>Navigate</strong>Move through the current filter.</span></div>
         <div><kbd>F</kbd><span><strong>Fullscreen</strong>Expand the image review area.</span></div>

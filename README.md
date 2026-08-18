@@ -8,8 +8,9 @@ No image is uploaded. Folder access and file operations stay in the browser on t
 
 - Large fit/fill preview and browser fullscreen mode
 - Neutral charcoal interface designed to keep attention on image color and detail
-- Up to nine custom tags, each with a renameable label, color, single-key shortcut, and independently chosen destination folder
-- Automatic advance after tagging, with Arrow Left/Right navigation
+- Up to nine custom tags, each with a renameable label, color, and single-key shortcut
+- Export-time destination selection for every tag used in the current batch
+- Shortcut keys toggle a tag on and off; optional auto-advance is off by default
 - All, untagged, and per-tag filters with a thumbnail filmstrip
 - Tag restoration when the same folder is reopened in the same browser
 - Collision-safe copying with byte-size verification; originals remain untouched
@@ -21,7 +22,7 @@ The full folder-copying workflow uses the File System Access API and works in cu
 
 Firefox and Safari can load, preview, and tag a selected folder through the fallback folder input, but they do not currently provide the required browser API for choosing writable destination folders. Copying is therefore disabled in those browsers.
 
-Sortlight reads images from the selected folder's top level. Each tag can point to a different folder anywhere the browser is allowed to access, including folders outside the source folder.
+Sortlight reads images from the selected folder's top level. At export time, each tag used in the batch can point to a different folder anywhere the browser is allowed to access, including folders outside the source folder.
 
 ## Local development
 
@@ -51,12 +52,11 @@ npm test
 - A destination folder must be different from the selected source folder.
 - A failed copy reports the failure and leaves the original untouched.
 - Browser-readable formats include JPEG, PNG, GIF, WebP, AVIF, BMP, and SVG. Formats such as HEIC may require conversion before the browser can preview them.
-- Settings, pending tag assignments, and destination-folder handles stay in that browser on that device. They do not sync between computers, so choose the relevant destination folders once on the Mac and once on Ubuntu.
+- Settings and pending tag assignments stay in that browser on that device. They do not sync between computers. Destination folders are chosen for each export batch.
 
 ## Project structure
 
 - `app/image-sorter.tsx` — folder access, review workflow, shortcuts, and safe sorting
-- `app/folder-store.ts` — device-local persistence for chosen destination-folder handles
 - `app/sorting.ts` — shared destination types and pure sorting helpers
 - `app/globals.css` — responsive visual system
 - `tests/rendered-html.test.mjs` — production-render and safety regression checks
