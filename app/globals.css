@@ -1,14 +1,15 @@
 @import "tailwindcss";
 
 :root {
-  --ink: #121414;
-  --muted: #777d79;
-  --line: #dfe2dc;
-  --paper: #f5f4ef;
-  --panel: #fbfaf6;
-  --accent: #ed5c36;
-  --accent-dark: #d64a27;
-  --stage: #181b1b;
+  color-scheme: dark;
+  --ink: #e3e6e4;
+  --muted: #969c99;
+  --line: #3d4240;
+  --paper: #252928;
+  --panel: #2c302f;
+  --accent: #b9bdbb;
+  --accent-dark: #d2d5d3;
+  --stage: #111313;
 }
 
 * { box-sizing: border-box; }
@@ -175,3 +176,42 @@ kbd { font-family: var(--font-geist-mono), monospace; }
 }
 
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; } }
+
+/* Neutral charcoal theme keeps the interface quiet around the photographs. */
+body { background: var(--paper); color: var(--ink); }
+.brand-mark { background: #666d6a; color: #f1f3f2; font-family: var(--font-geist-sans), Arial, sans-serif; font-style: normal; }
+.primary-button { background: #c4c8c6; color: #1e2120; box-shadow: none; }.primary-button:hover { background: #d7dad8; }
+.secondary-button, .icon-button { border-color: #474c4a; background: #323635; color: #d9dcda; }.secondary-button:hover { border-color: #686e6b; background: #393e3c; }
+.quiet-button { color: #b8bdba; }.quiet-button kbd { border-color: #555b58; background: #303432; color: #d7dad8; }
+
+.welcome-shell { background: #252928; }
+.welcome-shell::before { right: 0; width: 48vw; background: #2b2f2e; transform: none; }
+.welcome-shell::after { width: 48vw; opacity: .26; background-image: linear-gradient(rgb(230 234 232 / 7%) 1px, transparent 1px), linear-gradient(90deg, rgb(230 234 232 / 7%) 1px, transparent 1px); mask-image: linear-gradient(to right, transparent, #000 38%); }
+.welcome-header { border-bottom-color: rgb(232 235 233 / 9%); }
+.eyebrow { color: #8d9490; }.eyebrow span { background: #8e9591; }
+.welcome-content h1 { max-width: 650px; font-family: var(--font-geist-sans), Arial, sans-serif; font-size: clamp(58px, 5.7vw, 88px); font-style: normal; font-weight: 520; line-height: .96; letter-spacing: -.065em; }.welcome-content h1::first-line { font-style: normal; }
+.welcome-copy { color: #a9afac; }.browser-note, .privacy-note { color: #878e8a; }.privacy-note span { color: #aeb3b0; }
+.shortcut-preview { border-color: #444a47; background: rgb(47 51 50 / 96%); box-shadow: 0 22px 55px rgb(0 0 0 / 22%); transform: none; }.shortcut-preview::before { border-color: rgb(235 238 236 / 6%); }.shortcut-preview > p, .shortcut-preview small { color: #868d89; }
+.preview-row { border-top-color: #454a48; }.preview-row kbd { border-color: #5b615e; background: #383d3b; color: #e0e3e1; }.preview-row span { font-family: var(--font-geist-sans), Arial, sans-serif; color: #d8dcda; font-size: 16px; }.preview-progress { background: #414644; }.preview-progress span { background: #9da29f; }
+.welcome-steps { background: #191c1b; }.welcome-steps b { color: #9ea4a1; font-family: var(--font-geist-mono), monospace; font-size: 20px; font-style: normal; }.welcome-steps span { color: #818784; }.welcome-steps strong { color: #dce0de; }
+.drop-overlay { border-color: #9ca29f; background: rgb(37 41 40 / 94%); color: #d8dcda; font-family: var(--font-geist-sans), Arial, sans-serif; font-style: normal; }
+
+.workspace-shell { background: #202322; }.workspace-header, .tag-sidebar, .tag-controls { border-color: #3a3f3d; background: #2b2f2e; }.workspace-header .brand { border-color: #3a3f3d; }.folder-title span, .sidebar-heading { color: #8d9490; }
+.filter-row:hover { background: #343937; }.filter-row.active { background: #3b403e; }.filter-row b { color: #858c88; }.filter-symbol { color: #909793; }.filter-row kbd { border-color: #505653; background: #353a38; color: #d6dad8; }
+.sidebar-rule, .toggle-row { border-color: #414644; }.toggle-row i { background: #555b58; }.toggle-row input:checked + i { background: #858c88; }
+.read-only-note { background: #393934; color: #c0baa8; }
+.review-toolbar { border-color: #393e3c; background: #262a29; }.muted-label, .filename-block span { color: #858c88; }.view-controls { border-color: #454b48; background: #313634; }.view-controls button { color: #969d99; }.view-controls button.active { background: #444946; color: #e0e3e1; }
+.image-stage { background-color: #111313; background-image: linear-gradient(45deg, #171a19 25%, transparent 25%), linear-gradient(-45deg, #171a19 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #171a19 75%), linear-gradient(-45deg, transparent 75%, #171a19 75%); }
+.clear-tag { border-color: #3d4240; color: #959c98; }.clear-tag kbd, .tag-button-list kbd, .nav-hint kbd { border-color: #555b58; background: #383d3b; color: #dce0de; }
+.tag-button-list button { border-color: #444a47; background: #323735; color: #d8dcda; }.tag-button-list button.selected { background: #3a3f3d; }.nav-hint { color: #828985; }
+.filmstrip { border-color: #373c3a; background: #242827; }.filmstrip button { background: #171918; }.filmstrip button.active { border-color: #b4b9b6; }
+
+.dialog-backdrop { background: rgb(10 12 11 / 72%); }.dialog { background: #2d3130; }.dialog-header, .dialog-actions { border-color: #414644; }.dialog-header p { color: #969c99; }
+.settings-labels { color: #8b928e; }.destination-edit-row input { border-color: #4a504d; background: #353a38; color: #e0e3e1; }.folder-picker { border-color: #555b58; background: #323735; color: #a7ada9; }.folder-picker.selected { background: #383d3b; color: #e0e3e1; }.folder-picker:hover { border-color: #858c88; }.folder-picker b, .add-destination { color: #bdc2bf; }.add-destination span { color: #858c88; }
+.sort-summary > div { border-color: #414644; }.sort-summary code { color: #b2b7b4; }.safety-note { background: #343c38; color: #b9c7bf; }.safety-note > span { background: #697a70; }.help-grid { background: #414644; }.help-grid > div { background: #2d3130; }.help-grid kbd { border-color: #565c59; background: #383d3b; color: #e0e3e1; }.help-grid span { color: #969c99; }.help-grid strong { color: #e1e4e2; }
+.toast { border-color: #4a504d; border-left-color: #8c9690; background: #323735; color: #e0e3e1; box-shadow: 0 12px 40px rgb(0 0 0 / 28%); }.toast.warning { border-left-color: #a89d7b; }.toast.error { border-left-color: #a87870; }
+
+@media (max-width: 680px) {
+  .welcome-shell::before { right: -45vw; width: 100vw; }
+  .welcome-content h1 { font-size: clamp(50px, 15vw, 68px); }
+}

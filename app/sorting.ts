@@ -18,9 +18,9 @@ export type SortableImage = {
 };
 
 export const DEFAULT_DESTINATIONS: Destination[] = [
-  { id: "destination-1", label: "Destination 1", folder: "", shortcut: "1", color: "#f6c85f" },
-  { id: "destination-2", label: "Destination 2", folder: "", shortcut: "2", color: "#74b9ff" },
-  { id: "destination-3", label: "Destination 3", folder: "", shortcut: "3", color: "#9f8cff" },
+  { id: "destination-1", label: "Destination 1", folder: "", shortcut: "1", color: "#b9bdbb" },
+  { id: "destination-2", label: "Destination 2", folder: "", shortcut: "2", color: "#969c99" },
+  { id: "destination-3", label: "Destination 3", folder: "", shortcut: "3", color: "#747b78" },
 ];
 
 const IMAGE_EXTENSIONS = new Set([

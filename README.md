@@ -7,6 +7,7 @@ No image is uploaded. Folder access and file operations stay in the browser on t
 ## Features
 
 - Large fit/fill preview and browser fullscreen mode
+- Neutral charcoal interface designed to keep attention on image color and detail
 - Up to nine custom tags, each with a renameable label, color, single-key shortcut, and independently chosen destination folder
 - Automatic advance after tagging, with Arrow Left/Right navigation
 - All, untagged, and per-tag filters with a thumbnail filmstrip
