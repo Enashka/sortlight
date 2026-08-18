@@ -37,7 +37,8 @@ test("keeps export-time folder selection and local copy safeguards in source", a
   assert.match(component, /exportHandles\.get\(tagId\)/);
   assert.match(component, /Choose one destination folder for each tag used in this batch/);
   assert.doesNotMatch(component, /Tags, shortcuts & folders/);
-  assert.doesNotMatch(component, /removeEntry|sort-plan\.csv|makeCsv/);
+  assert.match(component, /buildSortingCsv/);
+  assert.doesNotMatch(component, /removeEntry/);
   assert.match(component, /Originals stay untouched/);
   assert.match(sorting, /Destination 1/);
   assert.doesNotMatch(sorting, /Favorites|To edit|Archive|Rejects/);

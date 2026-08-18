@@ -10,6 +10,7 @@ No image is uploaded. Folder access and file operations stay in the browser on t
 - Neutral charcoal interface designed to keep attention on image color and detail
 - Up to nine custom tags, each with a renameable label, color, and single-key shortcut
 - Export-time destination selection for every tag used in the current batch
+- CSV export of the complete sorting plan, including tagged and untagged images
 - Shortcut keys toggle a tag on and off; optional auto-advance is off by default
 - All, untagged, and per-tag filters with a thumbnail filmstrip
 - Tag restoration when the same folder is reopened in the same browser

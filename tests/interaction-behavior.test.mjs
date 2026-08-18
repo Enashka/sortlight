@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { pickDirectory } from "../app/browser-files.mjs";
+import { buildSortingCsv, csvDownloadName } from "../app/csv-export.mjs";
 import { filmstripRange } from "../app/filmstrip.mjs";
 import { toggledTag } from "../app/tagging.mjs";
 
@@ -31,4 +32,19 @@ test("keeps a large image folder's filmstrip DOM bounded", () => {
   assert.deepEqual(filmstripRange(5_132, 0), { start: 0, end: 120 });
   assert.deepEqual(filmstripRange(5_132, 2_566), { start: 2_506, end: 2_626 });
   assert.deepEqual(filmstripRange(80, 40), { start: 0, end: 80 });
+});
+
+test("exports a spreadsheet-safe CSV for tagged and untagged images", () => {
+  const csv = buildSortingCsv(
+    [
+      { name: '=SUM(1,2).jpg', size: 12, lastModified: 0, tagId: "keep" },
+      { name: 'portrait "final".png', size: 34, lastModified: 1_000, tagId: null },
+    ],
+    [{ id: "keep", label: "Selected, final", shortcut: "1" }],
+  );
+
+  assert.ok(csv.startsWith("\uFEFF"));
+  assert.match(csv, /"'=SUM\(1,2\)\.jpg","Selected, final","1","tagged","12"/);
+  assert.match(csv, /"portrait ""final""\.png","","","untagged","34"/);
+  assert.equal(csvDownloadName('July: selects/01'), "July- selects-01-sortlight.csv");
 });

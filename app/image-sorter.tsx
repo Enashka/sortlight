@@ -18,6 +18,7 @@ import {
   storedImageKey,
 } from "./sorting";
 import { pickDirectory, supportsDirectoryPicker } from "./browser-files.mjs";
+import { buildSortingCsv, csvDownloadName } from "./csv-export.mjs";
 import { filmstripRange } from "./filmstrip.mjs";
 import { toggledTag } from "./tagging.mjs";
 
@@ -447,6 +448,17 @@ export function ImageSorter() {
     }
   };
 
+  const exportCsv = () => {
+    const csv = buildSortingCsv(images, destinations);
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = csvDownloadName(folderName);
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    setNotice({ tone: "success", text: `CSV exported with ${images.length} images.` });
+  };
+
   const filterLabel =
     filter === "all"
       ? "All images"
@@ -550,7 +562,8 @@ export function ImageSorter() {
         </div>
         <div className="header-actions">
           <button className="icon-button" type="button" title="Keyboard help" onClick={() => setHelpOpen(true)}>?</button>
-          <button className="secondary-button" type="button" onClick={() => void openFolder()}>Open another folder</button>
+          <button className="secondary-button open-folder-button" type="button" onClick={() => void openFolder()}>Open another folder</button>
+          <button className="secondary-button csv-button" type="button" title="Download the complete sorting plan" onClick={exportCsv}>Export CSV</button>
           <button
             className="primary-button"
             type="button"
