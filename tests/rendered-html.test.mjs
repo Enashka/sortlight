@@ -25,17 +25,20 @@ test("server-renders the Sortlight application shell", async () => {
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });
 
-test("keeps local sorting safeguards and cross-browser fallback in source", async () => {
-  const [component, sorting] = await Promise.all([
+test("keeps local copy safeguards and destination-folder persistence in source", async () => {
+  const [component, sorting, folderStore] = await Promise.all([
     readFile(new URL("../app/image-sorter.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/sorting.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/folder-store.ts", import.meta.url), "utf8"),
   ]);
   assert.match(component, /showDirectoryPicker/);
   assert.match(component, /webkitdirectory/);
   assert.match(component, /writtenFile\.size !== sourceFile\.size/);
-  assert.match(component, /await folderHandle\.removeEntry\(image\.name\)/);
-  assert.ok(component.indexOf("writtenFile.size") < component.indexOf("removeEntry(image.name)"));
-  assert.match(component, /sort-plan\.csv/);
-  assert.match(sorting, /makeCsv/);
-  assert.match(sorting, /replaceAll\('"', '""'\)/);
+  assert.match(component, /directoryHandles\.get\(image\.tagId\)/);
+  assert.doesNotMatch(component, /removeEntry|sort-plan\.csv|makeCsv/);
+  assert.match(component, /Originals stay untouched/);
+  assert.match(sorting, /Destination 1/);
+  assert.doesNotMatch(sorting, /Favorites|To edit|Archive|Rejects/);
+  assert.match(folderStore, /indexedDB\.open/);
+  assert.match(folderStore, /store\.put\(handle, id\)/);
 });

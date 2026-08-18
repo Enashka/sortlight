@@ -10,15 +10,14 @@ import {
   useState,
 } from "react";
 import {
-  cleanFolderName,
   DEFAULT_DESTINATIONS,
   Destination,
   isImageFile,
   isValidShortcut,
-  makeCsv,
   SortableImage,
   storedImageKey,
 } from "./sorting";
+import { loadDirectoryHandles, saveDirectoryHandles } from "./folder-store";
 
 type DirectoryPickerWindow = Window & {
   showDirectoryPicker?: (options?: {
@@ -27,10 +26,19 @@ type DirectoryPickerWindow = Window & {
   }) => Promise<FileSystemDirectoryHandle>;
 };
 
+type PermissionDirectoryHandle = FileSystemDirectoryHandle & {
+  queryPermission(options: { mode: "readwrite" }): Promise<PermissionState>;
+  requestPermission(options: { mode: "readwrite" }): Promise<PermissionState>;
+};
+
+type IterableDirectoryHandle = FileSystemDirectoryHandle & {
+  values(): AsyncIterableIterator<FileSystemFileHandle | FileSystemDirectoryHandle>;
+};
+
 type Filter = "all" | "untagged" | string;
 type Notice = { tone: "success" | "warning" | "error"; text: string } | null;
 
-const DESTINATIONS_KEY = "sortlight:destinations:v1";
+const DESTINATIONS_KEY = "sortlight:destinations:v2";
 const AUTO_ADVANCE_KEY = "sortlight:auto-advance:v1";
 const TAGS_KEY_PREFIX = "sortlight:tags:v1:";
 
@@ -64,7 +72,7 @@ function makeDestination(): Destination {
   return {
     id: `destination-${Date.now()}`,
     label: "New tag",
-    folder: "New tag",
+    folder: "",
     shortcut: "",
     color: "#9f8cff",
   };
@@ -89,11 +97,19 @@ async function availableName(directory: FileSystemDirectoryHandle, fileName: str
   }
 }
 
+async function ensureWritePermission(directory: FileSystemDirectoryHandle) {
+  const permissionHandle = directory as PermissionDirectoryHandle;
+  if (typeof permissionHandle.queryPermission !== "function") return true;
+  if ((await permissionHandle.queryPermission({ mode: "readwrite" })) === "granted") return true;
+  return (await permissionHandle.requestPermission({ mode: "readwrite" })) === "granted";
+}
+
 export function ImageSorter() {
   const [images, setImages] = useState<SortableImage[]>([]);
-  const [folderHandle, setFolderHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [folderName, setFolderName] = useState("");
+  const [sourceDirectoryHandle, setSourceDirectoryHandle] = useState<FileSystemDirectoryHandle | null>(null);
   const [destinations, setDestinations] = useState<Destination[]>(savedDestinations);
+  const [directoryHandles, setDirectoryHandles] = useState<Map<string, FileSystemDirectoryHandle>>(new Map());
   const [currentIndex, setCurrentIndex] = useState(0);
   const [filter, setFilter] = useState<Filter>("all");
   const [autoAdvance, setAutoAdvance] = useState(savedAutoAdvance);
@@ -113,6 +129,20 @@ export function ImageSorter() {
     return () => objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    void loadDirectoryHandles(destinations.map((destination) => destination.id))
+      .then((handles) => {
+        if (!cancelled) setDirectoryHandles(handles);
+      })
+      .catch(() => {
+        // Folder handles are a convenience. The user can always select them again.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [destinations]);
+
   const visibleImages = useMemo(() => {
     if (filter === "all") return images;
     if (filter === "untagged") return images.filter((image) => !image.tagId);
@@ -123,6 +153,15 @@ export function ImageSorter() {
   const currentImage = visibleImages[safeIndex];
   const taggedCount = images.filter((image) => image.tagId).length;
   const untaggedCount = images.length - taggedCount;
+  const taggedDestinationIds = new Set(
+    images.flatMap((image) => (image.tagId ? [image.tagId] : [])),
+  );
+  const missingDestinationCount = [...taggedDestinationIds].filter(
+    (id) => !directoryHandles.has(id),
+  ).length;
+  const folderPickerSupported =
+    typeof window !== "undefined" &&
+    Boolean((window as DirectoryPickerWindow).showDirectoryPicker);
 
   const rememberTags = useCallback(
     (nextImages: SortableImage[]) => {
@@ -167,6 +206,7 @@ export function ImageSorter() {
             size: file.size,
             lastModified: file.lastModified,
             url,
+            file,
             handle,
             tagId: null,
           };
@@ -199,14 +239,14 @@ export function ImageSorter() {
     }
 
     try {
-      const directory = await picker({ id: "sortlight-source", mode: "readwrite" });
+      const directory = await picker({ id: "sortlight-source", mode: "read" });
       const files: Array<{ file: File; handle: FileSystemFileHandle }> = [];
-      for await (const entry of directory.values()) {
+      for await (const entry of (directory as IterableDirectoryHandle).values()) {
         if (entry.kind !== "file") continue;
         const file = await entry.getFile();
         if (isImageFile(file)) files.push({ file, handle: entry });
       }
-      setFolderHandle(directory);
+      setSourceDirectoryHandle(directory);
       loadFiles(files, directory.name);
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
@@ -223,7 +263,7 @@ export function ImageSorter() {
       if (!selected.length) return;
       const firstPath = selected[0].webkitRelativePath;
       const sourceName = firstPath.split("/")[0] || "Selected images";
-      setFolderHandle(null);
+      setSourceDirectoryHandle(null);
       loadFiles(selected.map((file) => ({ file })), sourceName);
       event.target.value = "";
     },
@@ -315,30 +355,36 @@ export function ImageSorter() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [applyTag, confirmOpen, destinations, helpOpen, moveBy, settingsOpen, toggleFullscreen]);
 
-  const saveDestinations = (nextDestinations: Destination[]) => {
+  const saveDestinations = async (
+    nextDestinations: Destination[],
+    nextHandles: Map<string, FileSystemDirectoryHandle>,
+  ) => {
     const normalized = nextDestinations.map((destination) => ({
       ...destination,
       label: destination.label.trim(),
-      folder: cleanFolderName(destination.folder),
+      folder: nextHandles.get(destination.id)?.name ?? destination.folder,
       shortcut: destination.shortcut.toLowerCase().trim(),
     }));
     const shortcuts = normalized.map((item) => item.shortcut).filter(Boolean);
-    const valid = normalized.every((item) =>
-      item.label &&
-      item.folder &&
-      item.folder !== "." &&
-      item.folder !== ".." &&
-      (!item.shortcut || isValidShortcut(item.shortcut)),
+    const valid = normalized.every(
+      (item) => item.label && (!item.shortcut || isValidShortcut(item.shortcut)),
     );
     if (!valid || new Set(shortcuts).size !== shortcuts.length) {
       setNotice({
         tone: "error",
-        text: "Each tag needs a name and folder. Shortcuts must be unique letters or 1–9.",
+        text: "Each tag needs a name. Shortcuts must be unique letters or 1–9.",
       });
       return;
     }
-    setDestinations(normalized);
     const destinationIds = new Set(normalized.map((item) => item.id));
+    let handlesPersisted = true;
+    try {
+      await saveDirectoryHandles(nextHandles, destinationIds);
+    } catch {
+      handlesPersisted = false;
+    }
+    setDestinations(normalized);
+    setDirectoryHandles(new Map(nextHandles));
     setImages((items) =>
       items.map((image) =>
         image.tagId && !destinationIds.has(image.tagId) ? { ...image, tagId: null } : image,
@@ -350,33 +396,35 @@ export function ImageSorter() {
     }
     window.localStorage.setItem(DESTINATIONS_KEY, JSON.stringify(normalized));
     setSettingsOpen(false);
-    setNotice({ tone: "success", text: "Shortcut settings saved." });
+    setNotice(
+      handlesPersisted
+        ? { tone: "success", text: "Tags, shortcuts, and destination folders saved." }
+        : { tone: "warning", text: "The tags were saved, but this browser may ask you to choose destination folders again." },
+    );
   };
 
-  const exportPlan = () => {
-    const csv = makeCsv(images, destinations);
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${folderName || "images"}-sort-plan.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const sortImages = async () => {
-    if (!folderHandle) return;
+  const copyImages = async () => {
     setIsSorting(true);
     setNotice(null);
     const successfulIds = new Set<string>();
     const failures: string[] = [];
+    const permissionByDestination = new Map<string, boolean>();
 
     for (const image of images.filter((item) => item.tagId)) {
       const destination = destinations.find((item) => item.id === image.tagId);
-      if (!destination || !image.handle) continue;
+      const directory = image.tagId ? directoryHandles.get(image.tagId) : null;
+      if (!destination || !directory) {
+        failures.push(image.name);
+        continue;
+      }
       try {
-        const sourceFile = await image.handle.getFile();
-        const directory = await folderHandle.getDirectoryHandle(destination.folder, { create: true });
+        let hasPermission = permissionByDestination.get(destination.id);
+        if (hasPermission === undefined) {
+          hasPermission = await ensureWritePermission(directory);
+          permissionByDestination.set(destination.id, hasPermission);
+        }
+        if (!hasPermission) throw new Error("Destination permission was not granted");
+        const sourceFile = image.handle ? await image.handle.getFile() : image.file;
         const nextName = await availableName(directory, image.name);
         const nextHandle = await directory.getFileHandle(nextName, { create: true });
         const writable = await nextHandle.createWritable();
@@ -384,7 +432,6 @@ export function ImageSorter() {
         await writable.close();
         const writtenFile = await nextHandle.getFile();
         if (writtenFile.size !== sourceFile.size) throw new Error("Copy verification failed");
-        await folderHandle.removeEntry(image.name);
         successfulIds.add(image.id);
       } catch {
         failures.push(image.name);
@@ -392,6 +439,12 @@ export function ImageSorter() {
     }
 
     const nextImages = images.filter((image) => !successfulIds.has(image.id));
+    for (const image of images) {
+      if (successfulIds.has(image.id)) URL.revokeObjectURL(image.url);
+    }
+    objectUrlsRef.current = objectUrlsRef.current.filter(
+      (url) => !images.some((image) => successfulIds.has(image.id) && image.url === url),
+    );
     setImages(nextImages);
     rememberTags(nextImages);
     setCurrentIndex(0);
@@ -400,10 +453,10 @@ export function ImageSorter() {
     if (failures.length) {
       setNotice({
         tone: "error",
-        text: `${successfulIds.size} moved; ${failures.length} could not be moved. The originals of failed files were left untouched.`,
+        text: `${successfulIds.size} copied; ${failures.length} could not be copied. Every original remains untouched.`,
       });
     } else {
-      setNotice({ tone: "success", text: `${successfulIds.size} images sorted successfully.` });
+      setNotice({ tone: "success", text: `${successfulIds.size} images copied. Your originals are unchanged.` });
     }
   };
 
@@ -431,7 +484,7 @@ export function ImageSorter() {
           setIsDragging(false);
           const files = Array.from(event.dataTransfer.files);
           if (files.length) {
-            setFolderHandle(null);
+            setSourceDirectoryHandle(null);
             loadFiles(files.map((file) => ({ file })), "Dropped images");
           }
         }}
@@ -450,14 +503,14 @@ export function ImageSorter() {
           <div className="eyebrow"><span /> PRIVATE · LOCAL · FAST</div>
           <h1>Give every image<br />a place to go.</h1>
           <p className="welcome-copy">
-            Review a folder at full size, tag with one key, then move every selection into
-            tidy destination folders—without uploading a single image.
+            Review a folder at full size, tag with one key, then copy every selection into
+            the destination folders you choose—without uploading a single image.
           </p>
           <div className="welcome-actions">
             <button className="primary-button large" type="button" onClick={() => void openFolder()}>
               <span aria-hidden="true">＋</span> Open image folder
             </button>
-            <p className="browser-note">Full file moving works in desktop Chrome, Chromium, and Edge.</p>
+            <p className="browser-note">Folder copying works in desktop Chrome, Chromium, and Edge.</p>
           </div>
           <div className="privacy-note"><span aria-hidden="true">◆</span> Your images stay on this device</div>
         </section>
@@ -478,7 +531,7 @@ export function ImageSorter() {
         <div className="welcome-steps" aria-label="Three steps">
           <div><b>01</b><span><strong>Open</strong>Your folder</span></div>
           <div><b>02</b><span><strong>Tag</strong>Use your keys</span></div>
-          <div><b>03</b><span><strong>Sort</strong>Move safely</span></div>
+          <div><b>03</b><span><strong>Copy</strong>Keep originals</span></div>
         </div>
 
         {isDragging && <div className="drop-overlay">Drop images to begin</div>}
@@ -516,9 +569,18 @@ export function ImageSorter() {
             className="primary-button"
             type="button"
             disabled={!taggedCount}
-            onClick={() => (folderHandle ? setConfirmOpen(true) : exportPlan())}
+            onClick={() => {
+              if (!folderPickerSupported) {
+                setNotice({ tone: "error", text: "Copying to folders requires desktop Chrome, Chromium, or Edge." });
+              } else if (missingDestinationCount) {
+                setNotice({ tone: "warning", text: "Choose a destination folder for every tag currently in use." });
+                setSettingsOpen(true);
+              } else {
+                setConfirmOpen(true);
+              }
+            }}
           >
-            {folderHandle ? `Sort ${taggedCount} images` : `Export ${taggedCount} tags`}
+            Copy {taggedCount} images
           </button>
         </div>
       </header>
@@ -526,7 +588,7 @@ export function ImageSorter() {
       <aside className="tag-sidebar">
         <div className="sidebar-heading">
           <span>DESTINATIONS</span>
-          <button type="button" onClick={() => setSettingsOpen(true)}>Edit</button>
+          <button type="button" onClick={() => setSettingsOpen(true)}>Manage up to 9</button>
         </div>
         <button
           className={`filter-row${filter === "all" ? " active" : ""}`}
@@ -550,6 +612,7 @@ export function ImageSorter() {
               className={`filter-row tag-filter${filter === destination.id ? " active" : ""}`}
               type="button"
               key={destination.id}
+              title={`${destination.label} → ${directoryHandles.get(destination.id)?.name ?? "Choose a folder"}`}
               onClick={() => { setFilter(destination.id); setCurrentIndex(0); }}
             >
               <span className="color-dot" style={{ background: destination.color }} />
@@ -576,8 +639,8 @@ export function ImageSorter() {
             <i />
           </label>
         </div>
-        {!folderHandle && (
-          <div className="read-only-note"><strong>Preview mode</strong><span>Export your tag plan as CSV. Use Chromium to move files.</span></div>
+        {!folderPickerSupported && (
+          <div className="read-only-note"><strong>Copy unavailable</strong><span>Open Sortlight in Chrome, Chromium, or Edge to choose destination folders.</span></div>
         )}
       </aside>
 
@@ -673,6 +736,9 @@ export function ImageSorter() {
       {settingsOpen && (
         <SettingsDialog
           destinations={destinations}
+          directoryHandles={directoryHandles}
+          sourceDirectoryHandle={sourceDirectoryHandle}
+          folderPickerSupported={folderPickerSupported}
           onCancel={() => setSettingsOpen(false)}
           onSave={saveDestinations}
         />
@@ -680,10 +746,11 @@ export function ImageSorter() {
       {confirmOpen && (
         <ConfirmDialog
           destinations={destinations}
+          directoryHandles={directoryHandles}
           images={images}
           isSorting={isSorting}
           onCancel={() => !isSorting && setConfirmOpen(false)}
-          onConfirm={() => void sortImages()}
+          onConfirm={() => void copyImages()}
         />
       )}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
@@ -707,12 +774,20 @@ function DialogFrame({ title, subtitle, children, onClose }: { title: string; su
   );
 }
 
-function SettingsDialog({ destinations, onCancel, onSave }: {
+function SettingsDialog({ destinations, directoryHandles, sourceDirectoryHandle, folderPickerSupported, onCancel, onSave }: {
   destinations: Destination[];
+  directoryHandles: Map<string, FileSystemDirectoryHandle>;
+  sourceDirectoryHandle: FileSystemDirectoryHandle | null;
+  folderPickerSupported: boolean;
   onCancel: () => void;
-  onSave: (destinations: Destination[]) => void;
+  onSave: (
+    destinations: Destination[],
+    handles: Map<string, FileSystemDirectoryHandle>,
+  ) => void | Promise<void>;
 }) {
   const [draft, setDraft] = useState(destinations);
+  const [draftHandles, setDraftHandles] = useState(() => new Map(directoryHandles));
+  const [pickerError, setPickerError] = useState("");
   const updateDestination = (id: string, patch: Partial<Destination>) => {
     setDraft((items) =>
       items.map((item) => (item.id === id ? { ...item, ...patch } : item)),
@@ -725,28 +800,50 @@ function SettingsDialog({ destinations, onCancel, onSave }: {
       updateDestination(id, { shortcut: event.key.toLowerCase() });
     }
   };
+  const chooseFolder = async (id: string) => {
+    const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
+    if (!picker) return;
+    try {
+      const handle = await picker({ id: `sortlight-destination-${id}`, mode: "readwrite" });
+      if (sourceDirectoryHandle && await handle.isSameEntry(sourceDirectoryHandle)) {
+        setPickerError("Choose a destination folder different from the source folder.");
+        return;
+      }
+      setDraftHandles((handles) => new Map(handles).set(id, handle));
+      updateDestination(id, { folder: handle.name });
+      setPickerError("");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setPickerError("That folder could not be opened. Check its permissions and try again.");
+    }
+  };
   return (
-    <DialogFrame title="Tags & shortcuts" subtitle="Each tag maps to one destination folder." onClose={onCancel}>
-      <div className="settings-labels"><span>Color & tag</span><span>Folder</span><span>Key</span><span /></div>
+    <DialogFrame title="Tags, shortcuts & folders" subtitle="Rename any tag, choose its folder, and create up to nine." onClose={onCancel}>
+      <div className="settings-labels"><span>Color & tag</span><span>Destination folder</span><span>Key</span><span /></div>
       <div className="destination-editor">
         {draft.map((destination) => (
           <div className="destination-edit-row" key={destination.id}>
             <input className="color-input" type="color" value={destination.color} onChange={(event) => updateDestination(destination.id, { color: event.target.value })} aria-label={`${destination.label} color`} />
             <input value={destination.label} onChange={(event) => updateDestination(destination.id, { label: event.target.value })} aria-label="Tag name" />
-            <input value={destination.folder} onChange={(event) => updateDestination(destination.id, { folder: event.target.value })} aria-label="Folder name" />
+            <button className={`folder-picker${draftHandles.has(destination.id) ? " selected" : ""}`} type="button" disabled={!folderPickerSupported} onClick={() => void chooseFolder(destination.id)}>
+              <span>{draftHandles.get(destination.id)?.name || destination.folder || "Choose folder"}</span><b>Choose</b>
+            </button>
             <input className="shortcut-input" value={destination.shortcut} maxLength={1} onKeyDown={(event) => restrictShortcut(event, destination.id)} onChange={(event) => updateDestination(destination.id, { shortcut: event.target.value.replace(/[^a-z0-9]/gi, "").slice(0, 1) })} aria-label="Shortcut key" />
-            <button className="remove-row" type="button" onClick={() => setDraft((items) => items.filter((item) => item.id !== destination.id))} aria-label={`Remove ${destination.label}`}>×</button>
+            <button className="remove-row" type="button" onClick={() => { setDraft((items) => items.filter((item) => item.id !== destination.id)); setDraftHandles((handles) => { const next = new Map(handles); next.delete(destination.id); return next; }); }} aria-label={`Remove ${destination.label}`}>×</button>
           </div>
         ))}
       </div>
-      <button className="add-destination" type="button" disabled={draft.length >= 9} onClick={() => setDraft((items) => [...items, makeDestination()])}>＋ Add destination</button>
-      <div className="dialog-actions"><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" onClick={() => onSave(draft)}>Save shortcuts</button></div>
+      {pickerError && <p className="settings-error" role="alert">{pickerError}</p>}
+      {!folderPickerSupported && <p className="settings-error">Choosing destination folders requires desktop Chrome, Chromium, or Edge.</p>}
+      <button className="add-destination" type="button" disabled={draft.length >= 9} onClick={() => setDraft((items) => [...items, makeDestination()])}>＋ Add tag <span>{draft.length} / 9</span></button>
+      <div className="dialog-actions"><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" onClick={() => void onSave(draft, draftHandles)}>Save tags & folders</button></div>
     </DialogFrame>
   );
 }
 
-function ConfirmDialog({ destinations, images, isSorting, onCancel, onConfirm }: {
+function ConfirmDialog({ destinations, directoryHandles, images, isSorting, onCancel, onConfirm }: {
   destinations: Destination[];
+  directoryHandles: Map<string, FileSystemDirectoryHandle>;
   images: SortableImage[];
   isSorting: boolean;
   onCancel: () => void;
@@ -758,14 +855,14 @@ function ConfirmDialog({ destinations, images, isSorting, onCancel, onConfirm }:
   })).filter((group) => group.count);
   const total = groups.reduce((sum, group) => sum + group.count, 0);
   return (
-    <DialogFrame title={`Sort ${total} images?`} subtitle="Files are copied, verified, then removed from the source folder." onClose={onCancel}>
+    <DialogFrame title={`Copy ${total} images?`} subtitle="A verified copy goes to each chosen folder. Every original stays where it is." onClose={onCancel}>
       <div className="sort-summary">
         {groups.map(({ destination, count }) => (
-          <div key={destination.id}><span className="color-dot" style={{ background: destination.color }} /><strong>{count} {count === 1 ? "image" : "images"}</strong><span>→</span><code>/{destination.folder}</code></div>
+          <div key={destination.id}><span className="color-dot" style={{ background: destination.color }} /><strong>{count} {count === 1 ? "image" : "images"}</strong><span>→</span><code>{directoryHandles.get(destination.id)?.name}</code></div>
         ))}
       </div>
-      <div className="safety-note"><span>✓</span><p><strong>Safe by default</strong>A source file is only deleted after its destination copy has been verified. Existing names receive a numbered suffix.</p></div>
-      <div className="dialog-actions"><button className="secondary-button" type="button" disabled={isSorting} onClick={onCancel}>Keep reviewing</button><button className="primary-button" type="button" disabled={isSorting} onClick={onConfirm}>{isSorting ? "Sorting…" : "Move images"}</button></div>
+      <div className="safety-note"><span>✓</span><p><strong>Originals stay untouched</strong>Every copy is verified by file size. Existing names receive a numbered suffix.</p></div>
+      <div className="dialog-actions"><button className="secondary-button" type="button" disabled={isSorting} onClick={onCancel}>Keep reviewing</button><button className="primary-button" type="button" disabled={isSorting} onClick={onConfirm}>{isSorting ? "Copying…" : "Copy images"}</button></div>
     </DialogFrame>
   );
 }
