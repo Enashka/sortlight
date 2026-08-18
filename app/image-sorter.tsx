@@ -500,11 +500,10 @@ export function ImageSorter() {
         </header>
 
         <section className="welcome-content" id="top">
-          <div className="eyebrow"><span /> PRIVATE · LOCAL · FAST</div>
-          <h1>Give every image<br />a place to go.</h1>
+          <h1>Image sorter</h1>
           <p className="welcome-copy">
-            Review a folder at full size, tag with one key, then copy every selection into
-            the destination folders you choose—without uploading a single image.
+            Open a local folder, assign up to nine keyboard tags, choose a destination
+            folder for each tag, and copy the selected images.
           </p>
           <div className="welcome-actions">
             <button className="primary-button large" type="button" onClick={() => void openFolder()}>
@@ -516,7 +515,7 @@ export function ImageSorter() {
         </section>
 
         <aside className="shortcut-preview" aria-label="Example keyboard shortcuts">
-          <p>ONE KEY. NEXT IMAGE.</p>
+          <p>KEYBOARD SHORTCUTS</p>
           {DEFAULT_DESTINATIONS.slice(0, 3).map((destination, index) => (
             <div className={`preview-row row-${index + 1}`} key={destination.id}>
               <kbd>{destination.shortcut}</kbd>

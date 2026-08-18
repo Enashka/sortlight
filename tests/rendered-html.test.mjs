@@ -19,9 +19,10 @@ test("server-renders the Sortlight application shell", async () => {
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
   const html = await response.text();
   assert.match(html, /<title>Sortlight — Local image sorter<\/title>/i);
-  assert.match(html, /Give every image/);
+  assert.match(html, /Image sorter/);
   assert.match(html, /Open image folder/);
   assert.match(html, /Your images stay on this device/);
+  assert.doesNotMatch(html, /Give every image|a place to go/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
 });
 
