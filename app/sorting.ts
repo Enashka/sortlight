@@ -13,7 +13,7 @@ export type SortableImage = {
   url: string;
   file: File;
   handle?: FileSystemFileHandle;
-  tagId: string | null;
+  tagIds: string[];
 };
 
 export const DEFAULT_DESTINATIONS: Destination[] = [

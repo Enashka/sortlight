@@ -20,7 +20,7 @@ import {
 import { pickDirectory, supportsDirectoryPicker } from "./browser-files.mjs";
 import { buildSortingCsv, csvDownloadName } from "./csv-export.mjs";
 import { filmstripRange } from "./filmstrip.mjs";
-import { toggledTag } from "./tagging.mjs";
+import { normalizeTagIds, toggledTags } from "./tagging.mjs";
 
 type DirectoryPickerWindow = Window & {
   showDirectoryPicker?: (options?: {
@@ -43,7 +43,8 @@ type Notice = { tone: "success" | "warning" | "error"; text: string } | null;
 
 const DESTINATIONS_KEY = "sortlight:destinations:v2";
 const AUTO_ADVANCE_KEY = "sortlight:auto-advance:v2";
-const TAGS_KEY_PREFIX = "sortlight:tags:v1:";
+const TAGS_KEY_PREFIX = "sortlight:tags:v2:";
+const LEGACY_TAGS_KEY_PREFIX = "sortlight:tags:v1:";
 
 function savedDestinations() {
   if (typeof window === "undefined") return DEFAULT_DESTINATIONS;
@@ -145,8 +146,8 @@ export function ImageSorter() {
 
   const visibleImages = useMemo(() => {
     if (filter === "all") return images;
-    if (filter === "untagged") return images.filter((image) => !image.tagId);
-    return images.filter((image) => image.tagId === filter);
+    if (filter === "untagged") return images.filter((image) => !image.tagIds.length);
+    return images.filter((image) => image.tagIds.includes(filter));
   }, [filter, images]);
 
   const safeIndex = Math.min(currentIndex, Math.max(visibleImages.length - 1, 0));
@@ -156,7 +157,7 @@ export function ImageSorter() {
     visibleFilmstripRange.start,
     visibleFilmstripRange.end,
   );
-  const taggedCount = images.filter((image) => image.tagId).length;
+  const taggedCount = images.filter((image) => image.tagIds.length).length;
   const untaggedCount = images.length - taggedCount;
   const folderPickerSupported =
     typeof window !== "undefined" && supportsDirectoryPicker(window as DirectoryPickerWindow);
@@ -171,8 +172,8 @@ export function ImageSorter() {
       try {
         const saved = Object.fromEntries(
           nextImages
-            .filter((image) => image.tagId)
-            .map((image) => [storedImageKey(image), image.tagId]),
+            .filter((image) => image.tagIds.length)
+            .map((image) => [storedImageKey(image), image.tagIds]),
         );
         window.localStorage.setItem(`${TAGS_KEY_PREFIX}${folderName}`, JSON.stringify(saved));
       } catch {
@@ -187,14 +188,18 @@ export function ImageSorter() {
       objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       objectUrlsRef.current = [];
 
-      let savedTags: Record<string, string> = {};
+      let savedTags: Record<string, string | string[]> = {};
       try {
-        savedTags = JSON.parse(
-          window.localStorage.getItem(`${TAGS_KEY_PREFIX}${sourceName}`) ?? "{}",
-        ) as Record<string, string>;
+        const currentSavedTags = window.localStorage.getItem(`${TAGS_KEY_PREFIX}${sourceName}`);
+        const legacySavedTags = window.localStorage.getItem(`${LEGACY_TAGS_KEY_PREFIX}${sourceName}`);
+        savedTags = JSON.parse(currentSavedTags ?? legacySavedTags ?? "{}") as Record<
+          string,
+          string | string[]
+        >;
       } catch {
         savedTags = {};
       }
+      const validTagIds = new Set(destinations.map((destination) => destination.id));
 
       const nextImages = files
         .filter(({ file }) => isImageFile(file))
@@ -210,12 +215,12 @@ export function ImageSorter() {
             url,
             file,
             handle,
-            tagId: null,
+            tagIds: [],
           };
-          const savedTag = savedTags[storedImageKey(image)];
-          image.tagId = destinations.some((destination) => destination.id === savedTag)
-            ? savedTag
-            : null;
+          image.tagIds = normalizeTagIds(
+            savedTags[storedImageKey(image)],
+            validTagIds,
+          );
           return image;
         });
 
@@ -287,15 +292,15 @@ export function ImageSorter() {
   const applyTag = useCallback(
     (tagId: string | null) => {
       if (!currentImage) return;
-      const nextTagId = toggledTag(currentImage.tagId, tagId);
+      const nextTagIds = toggledTags(currentImage.tagIds, tagId);
       const nextImages = images.map((image) =>
         image.id === currentImage.id
-          ? { ...image, tagId: nextTagId }
+          ? { ...image, tagIds: nextTagIds }
           : image,
       );
       setImages(nextImages);
       rememberTags(nextImages);
-      if (autoAdvance && nextTagId && safeIndex < visibleImages.length - 1) {
+      if (autoAdvance && tagId && nextTagIds.includes(tagId) && safeIndex < visibleImages.length - 1) {
         setCurrentIndex(safeIndex + 1);
       }
     },
@@ -381,9 +386,10 @@ export function ImageSorter() {
     const destinationIds = new Set(normalized.map((item) => item.id));
     setDestinations(normalized);
     setImages((items) =>
-      items.map((image) =>
-        image.tagId && !destinationIds.has(image.tagId) ? { ...image, tagId: null } : image,
-      ),
+      items.map((image) => ({
+        ...image,
+        tagIds: image.tagIds.filter((tagId) => destinationIds.has(tagId)),
+      })),
     );
     if (filter !== "all" && filter !== "untagged" && !destinationIds.has(filter)) {
       setFilter("all");
@@ -397,41 +403,61 @@ export function ImageSorter() {
   const copyImages = async (exportHandles: Map<string, FileSystemDirectoryHandle>) => {
     setIsSorting(true);
     setNotice(null);
-    const successfulIds = new Set<string>();
+    const successfulTagsByImage = new Map<string, Set<string>>();
     const failures: string[] = [];
     const permissionByTag = new Map<string, boolean>();
+    let successfulCopyCount = 0;
 
-    for (const image of images.filter((item) => item.tagId)) {
-      try {
-        const tagId = image.tagId;
-        const directory = tagId ? exportHandles.get(tagId) : null;
-        if (!tagId || !directory) throw new Error("Export folder is missing");
-        let hasPermission = permissionByTag.get(tagId);
-        if (hasPermission === undefined) {
-          hasPermission = await ensureWritePermission(directory);
-          permissionByTag.set(tagId, hasPermission);
+    for (const image of images.filter((item) => item.tagIds.length)) {
+      for (const tagId of image.tagIds) {
+        try {
+          const directory = exportHandles.get(tagId);
+          if (!directory) throw new Error("Export folder is missing");
+          let hasPermission = permissionByTag.get(tagId);
+          if (hasPermission === undefined) {
+            hasPermission = await ensureWritePermission(directory);
+            permissionByTag.set(tagId, hasPermission);
+          }
+          if (!hasPermission) throw new Error("Destination permission was not granted");
+          const sourceFile = image.handle ? await image.handle.getFile() : image.file;
+          const nextName = await availableName(directory, image.name);
+          const nextHandle = await directory.getFileHandle(nextName, { create: true });
+          const writable = await nextHandle.createWritable();
+          await writable.write(sourceFile);
+          await writable.close();
+          const writtenFile = await nextHandle.getFile();
+          if (writtenFile.size !== sourceFile.size) throw new Error("Copy verification failed");
+          const successfulTags = successfulTagsByImage.get(image.id) ?? new Set<string>();
+          successfulTags.add(tagId);
+          successfulTagsByImage.set(image.id, successfulTags);
+          successfulCopyCount += 1;
+        } catch {
+          failures.push(`${image.name}:${tagId}`);
         }
-        if (!hasPermission) throw new Error("Destination permission was not granted");
-        const sourceFile = image.handle ? await image.handle.getFile() : image.file;
-        const nextName = await availableName(directory, image.name);
-        const nextHandle = await directory.getFileHandle(nextName, { create: true });
-        const writable = await nextHandle.createWritable();
-        await writable.write(sourceFile);
-        await writable.close();
-        const writtenFile = await nextHandle.getFile();
-        if (writtenFile.size !== sourceFile.size) throw new Error("Copy verification failed");
-        successfulIds.add(image.id);
-      } catch {
-        failures.push(image.name);
       }
     }
 
-    const nextImages = images.filter((image) => !successfulIds.has(image.id));
+    const completedIds = new Set(
+      images
+        .filter(
+          (image) =>
+            image.tagIds.length > 0 &&
+            image.tagIds.every((tagId) => successfulTagsByImage.get(image.id)?.has(tagId)),
+        )
+        .map((image) => image.id),
+    );
+    const nextImages = images.flatMap((image) => {
+      if (completedIds.has(image.id)) return [];
+      const successfulTags = successfulTagsByImage.get(image.id);
+      return successfulTags
+        ? [{ ...image, tagIds: image.tagIds.filter((tagId) => !successfulTags.has(tagId)) }]
+        : [image];
+    });
     for (const image of images) {
-      if (successfulIds.has(image.id)) URL.revokeObjectURL(image.url);
+      if (completedIds.has(image.id)) URL.revokeObjectURL(image.url);
     }
     objectUrlsRef.current = objectUrlsRef.current.filter(
-      (url) => !images.some((image) => successfulIds.has(image.id) && image.url === url),
+      (url) => !images.some((image) => completedIds.has(image.id) && image.url === url),
     );
     setImages(nextImages);
     rememberTags(nextImages);
@@ -441,10 +467,10 @@ export function ImageSorter() {
     if (failures.length) {
       setNotice({
         tone: "error",
-        text: `${successfulIds.size} copied; ${failures.length} could not be copied. Every original remains untouched.`,
+        text: `${successfulCopyCount} copies created; ${failures.length} could not be copied. Successful tags were cleared so retrying will not duplicate them.`,
       });
     } else {
-      setNotice({ tone: "success", text: `${successfulIds.size} images copied. Your originals are unchanged.` });
+      setNotice({ tone: "success", text: `${successfulCopyCount} copies created. Your originals are unchanged.` });
     }
   };
 
@@ -501,8 +527,8 @@ export function ImageSorter() {
         <section className="welcome-content" id="top">
           <h1>Image sorter</h1>
           <p className="welcome-copy">
-            Open a local folder, sort images with up to nine keyboard tags, then choose
-            destination folders when you export.
+            Open a local folder, assign one or more keyboard tags to each image, then
+            choose destination folders when you export.
           </p>
           <div className="welcome-actions">
             <button className="primary-button large" type="button" onClick={() => void openFolder()}>
@@ -602,7 +628,7 @@ export function ImageSorter() {
         </button>
         <div className="sidebar-rule" />
         {destinations.map((destination) => {
-          const count = images.filter((image) => image.tagId === destination.id).length;
+          const count = images.filter((image) => image.tagIds.includes(destination.id)).length;
           return (
             <button
               className={`filter-row tag-filter${filter === destination.id ? " active" : ""}`}
@@ -670,21 +696,27 @@ export function ImageSorter() {
           ) : (
             <div className="image-error"><span>Image preview unavailable</span><small>The file is preserved and can still be tagged.</small></div>
           )}
-          {currentImage?.tagId && (
-            <div className="active-tag" style={{ background: destinations.find((item) => item.id === currentImage.tagId)?.color }}>
-              {destinations.find((item) => item.id === currentImage.tagId)?.label}
+          {currentImage?.tagIds.length ? (
+            <div className="active-tags" aria-label="Assigned tags">
+              {destinations
+                .filter((destination) => currentImage.tagIds.includes(destination.id))
+                .map((destination) => (
+                  <span className="active-tag" style={{ background: destination.color }} key={destination.id}>
+                    {destination.label}
+                  </span>
+                ))}
             </div>
-          )}
+          ) : null}
           <button className="stage-arrow previous" type="button" disabled={safeIndex === 0} onClick={() => moveBy(-1)} aria-label="Previous image">‹</button>
           <button className="stage-arrow next" type="button" disabled={safeIndex >= visibleImages.length - 1} onClick={() => moveBy(1)} aria-label="Next image">›</button>
         </div>
 
         <div className="tag-controls" aria-label="Tag current image">
-          <button className="clear-tag" type="button" onClick={() => applyTag(null)} title="Clear tag (0)"><kbd>0</kbd><span>Clear</span></button>
+          <button className="clear-tag" type="button" onClick={() => applyTag(null)} title="Clear all tags (0)"><kbd>0</kbd><span>Clear all</span></button>
           <div className="tag-button-list">
             {destinations.map((destination) => (
               <button
-                className={currentImage?.tagId === destination.id ? "selected" : ""}
+                className={currentImage?.tagIds.includes(destination.id) ? "selected" : ""}
                 style={{ "--tag-color": destination.color } as React.CSSProperties}
                 type="button"
                 key={destination.id}
@@ -701,7 +733,7 @@ export function ImageSorter() {
       <aside className="filmstrip" aria-label="Image filmstrip">
         {filmstripImages.map((image, windowIndex) => {
           const index = visibleFilmstripRange.start + windowIndex;
-          const tag = destinations.find((destination) => destination.id === image.tagId);
+          const tags = destinations.filter((destination) => image.tagIds.includes(destination.id));
           return (
             <button
               className={index === safeIndex ? "active" : ""}
@@ -714,7 +746,11 @@ export function ImageSorter() {
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={image.url} alt="" loading="lazy" />
               <span>{index + 1}</span>
-              {tag && <i style={{ background: tag.color }} />}
+              {tags.length > 0 && (
+                <div className="filmstrip-tags">
+                  {tags.slice(0, 4).map((tag) => <i style={{ background: tag.color }} key={tag.id} />)}
+                </div>
+              )}
             </button>
           );
         })}
@@ -820,9 +856,10 @@ function ConfirmDialog({ destinations, images, isSorting, sourceDirectoryHandle,
   const [pickerError, setPickerError] = useState("");
   const groups = destinations.map((destination) => ({
     destination,
-    count: images.filter((image) => image.tagId === destination.id).length,
+    count: images.filter((image) => image.tagIds.includes(destination.id)).length,
   })).filter((group) => group.count);
-  const total = groups.reduce((sum, group) => sum + group.count, 0);
+  const taggedImageCount = images.filter((image) => image.tagIds.length).length;
+  const copyCount = groups.reduce((sum, group) => sum + group.count, 0);
   const missingFolder = groups.some(({ destination }) => !draftHandles.has(destination.id));
   const chooseFolder = async (id: string) => {
     try {
@@ -842,7 +879,7 @@ function ConfirmDialog({ destinations, images, isSorting, sourceDirectoryHandle,
     }
   };
   return (
-    <DialogFrame title={`Export ${total} images`} subtitle="Choose one destination folder for each tag used in this batch." onClose={onCancel}>
+    <DialogFrame title={`Export ${taggedImageCount} images`} subtitle={`Choose one destination per tag. This will create ${copyCount} copies.`} onClose={onCancel}>
       <div className="sort-summary">
         {groups.map(({ destination, count }) => (
           <div key={destination.id}>
@@ -866,8 +903,8 @@ function HelpDialog({ onClose }: { onClose: () => void }) {
   return (
     <DialogFrame title="Keyboard guide" subtitle="Keep your hands on the keyboard and move quickly." onClose={onClose}>
       <div className="help-grid">
-        <div><kbd>1–9</kbd><span><strong>Toggle a tag</strong>Press the same shortcut again to remove it.</span></div>
-        <div><kbd>0</kbd><span><strong>Clear a tag</strong>Return the image to untagged.</span></div>
+        <div><kbd>1–9</kbd><span><strong>Toggle tags</strong>Add several tags; press a shortcut again to remove only that tag.</span></div>
+        <div><kbd>0</kbd><span><strong>Clear all tags</strong>Return the image to untagged.</span></div>
         <div><kbd>← →</kbd><span><strong>Navigate</strong>Move through the current filter.</span></div>
         <div><kbd>F</kbd><span><strong>Fullscreen</strong>Expand the image review area.</span></div>
         <div><kbd>?</kbd><span><strong>Open this guide</strong>Shortcuts pause while dialogs are open.</span></div>

@@ -1,6 +1,6 @@
 # Sortlight
 
-Sortlight is a privacy-first image review and sorting app. It opens a local folder in the browser, shows each image at a large size, assigns one destination tag with configurable keyboard shortcuts, and then safely copies tagged images into independently chosen folders.
+Sortlight is a privacy-first image review and sorting app. It opens a local folder in the browser, shows each image at a large size, assigns one or more configurable keyboard tags, and then safely copies tagged images into independently chosen folders.
 
 No image is uploaded. Folder access and file operations stay in the browser on the computer where Sortlight is open.
 
@@ -9,6 +9,7 @@ No image is uploaded. Folder access and file operations stay in the browser on t
 - Large fit/fill preview and browser fullscreen mode
 - Neutral charcoal interface designed to keep attention on image color and detail
 - Up to nine custom tags, each with a renameable label, color, and single-key shortcut
+- Multiple tags can be assigned to the same image and toggled independently
 - Export-time destination selection for every tag used in the current batch
 - CSV export of the complete sorting plan, including tagged and untagged images
 - Shortcut keys toggle a tag on and off; optional auto-advance is off by default

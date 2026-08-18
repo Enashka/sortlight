@@ -10,14 +10,16 @@ function csvCell(value) {
 export function buildSortingCsv(images, destinations) {
   const tagsById = new Map(destinations.map((destination) => [destination.id, destination]));
   const rows = [
-    ["Filename", "Tag", "Shortcut", "Status", "Size (bytes)", "Last modified (UTC)"],
+    ["Filename", "Tags", "Shortcuts", "Status", "Size (bytes)", "Last modified (UTC)"],
     ...images.map((image) => {
-      const tag = image.tagId ? tagsById.get(image.tagId) : null;
+      const tags = image.tagIds
+        .map((tagId) => tagsById.get(tagId))
+        .filter(Boolean);
       return [
         image.name,
-        tag?.label ?? "",
-        tag?.shortcut ?? "",
-        tag ? "tagged" : "untagged",
+        tags.map((tag) => tag.label).join("; "),
+        tags.map((tag) => tag.shortcut).filter(Boolean).join("; "),
+        tags.length ? "tagged" : "untagged",
         image.size,
         new Date(image.lastModified).toISOString(),
       ];

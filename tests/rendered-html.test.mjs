@@ -35,7 +35,8 @@ test("keeps export-time folder selection and local copy safeguards in source", a
   assert.match(component, /webkitdirectory/);
   assert.match(component, /writtenFile\.size !== sourceFile\.size/);
   assert.match(component, /exportHandles\.get\(tagId\)/);
-  assert.match(component, /Choose one destination folder for each tag used in this batch/);
+  assert.match(component, /for \(const tagId of image\.tagIds\)/);
+  assert.match(component, /Choose one destination per tag/);
   assert.doesNotMatch(component, /Tags, shortcuts & folders/);
   assert.match(component, /buildSortingCsv/);
   assert.doesNotMatch(component, /removeEntry/);
