@@ -22,8 +22,28 @@ test("server-renders the Sortlight application shell", async () => {
   assert.match(html, /Image sorter/);
   assert.match(html, /Open image folder/);
   assert.match(html, /Your images stay on this device/);
+  assert.match(html, /rel="manifest" href="\/manifest\.webmanifest"/);
+  assert.match(html, /apple-touch-icon/);
   assert.doesNotMatch(html, /Give every image|a place to go/i);
   assert.doesNotMatch(html, /codex-preview|react-loading-skeleton|Your site is taking shape/i);
+});
+
+test("provides an installable desktop web app manifest", async () => {
+  const [manifestText, serviceWorker, icon192, icon512] = await Promise.all([
+    readFile(new URL("../public/manifest.webmanifest", import.meta.url), "utf8"),
+    readFile(new URL("../public/sw.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/icons/sortlight-192.png", import.meta.url)),
+    readFile(new URL("../public/icons/sortlight-512.png", import.meta.url)),
+  ]);
+  const manifest = JSON.parse(manifestText);
+  assert.equal(manifest.name, "Sortlight — Local image sorter");
+  assert.equal(manifest.display, "standalone");
+  assert.equal(manifest.theme_color, "#252928");
+  assert.deepEqual(manifest.icons.map((icon) => icon.sizes), ["192x192", "512x512"]);
+  assert.match(serviceWorker, /addEventListener\("fetch"/);
+  assert.match(serviceWorker, /sortlight-512\.png/);
+  assert.ok(icon192.byteLength > 1_000);
+  assert.ok(icon512.byteLength > icon192.byteLength);
 });
 
 test("keeps export-time folder selection and local copy safeguards in source", async () => {

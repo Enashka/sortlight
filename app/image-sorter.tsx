@@ -40,6 +40,10 @@ type IterableDirectoryHandle = FileSystemDirectoryHandle & {
 
 type Filter = "all" | "untagged" | string;
 type Notice = { tone: "success" | "warning" | "error"; text: string } | null;
+type BeforeInstallPromptEvent = Event & {
+  prompt: () => Promise<void>;
+  userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
+};
 
 const DESTINATIONS_KEY = "sortlight:destinations:v2";
 const AUTO_ADVANCE_KEY = "sortlight:auto-advance:v2";
@@ -135,6 +139,7 @@ export function ImageSorter() {
   const [notice, setNotice] = useState<Notice>(null);
   const [failedImageIds, setFailedImageIds] = useState<Set<string>>(new Set());
   const [isDragging, setIsDragging] = useState(false);
+  const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageStageRef = useRef<HTMLDivElement>(null);
   const currentThumbnailRef = useRef<HTMLButtonElement>(null);
@@ -142,6 +147,27 @@ export function ImageSorter() {
 
   useEffect(() => {
     return () => objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+  }, []);
+
+  useEffect(() => {
+    const rememberInstallPrompt = (event: Event) => {
+      event.preventDefault();
+      setInstallPrompt(event as BeforeInstallPromptEvent);
+    };
+    const clearInstallPrompt = () => setInstallPrompt(null);
+
+    window.addEventListener("beforeinstallprompt", rememberInstallPrompt);
+    window.addEventListener("appinstalled", clearInstallPrompt);
+    if ("serviceWorker" in navigator) {
+      void navigator.serviceWorker.register("/sw.js").catch(() => {
+        // Installation remains available from Chrome's menu if registration fails.
+      });
+    }
+
+    return () => {
+      window.removeEventListener("beforeinstallprompt", rememberInstallPrompt);
+      window.removeEventListener("appinstalled", clearInstallPrompt);
+    };
   }, []);
 
   const visibleImages = useMemo(() => {
@@ -485,6 +511,16 @@ export function ImageSorter() {
     setNotice({ tone: "success", text: `CSV exported with ${images.length} images.` });
   };
 
+  const installApp = async () => {
+    if (!installPrompt) return;
+    await installPrompt.prompt();
+    const choice = await installPrompt.userChoice;
+    setInstallPrompt(null);
+    if (choice.outcome === "accepted") {
+      setNotice({ tone: "success", text: "Sortlight installed. You can now pin it to your Dock or launcher." });
+    }
+  };
+
   const filterLabel =
     filter === "all"
       ? "All images"
@@ -519,9 +555,12 @@ export function ImageSorter() {
             <span className="brand-mark" aria-hidden="true">S</span>
             <span>Sortlight</span>
           </a>
-          <button className="quiet-button" type="button" onClick={() => setHelpOpen(true)}>
-            How it works <kbd>?</kbd>
-          </button>
+          <div className="welcome-header-actions">
+            {installPrompt && <button className="secondary-button" type="button" onClick={() => void installApp()}>Install app</button>}
+            <button className="quiet-button" type="button" onClick={() => setHelpOpen(true)}>
+              How it works <kbd>?</kbd>
+            </button>
+          </div>
         </header>
 
         <section className="welcome-content" id="top">
@@ -588,6 +627,7 @@ export function ImageSorter() {
         </div>
         <div className="header-actions">
           <button className="icon-button" type="button" title="Keyboard help" onClick={() => setHelpOpen(true)}>?</button>
+          {installPrompt && <button className="secondary-button install-app-button" type="button" onClick={() => void installApp()}>Install app</button>}
           <button className="secondary-button open-folder-button" type="button" onClick={() => void openFolder()}>Open another folder</button>
           <button className="secondary-button csv-button" type="button" title="Download the complete sorting plan" onClick={exportCsv}>Export CSV</button>
           <button

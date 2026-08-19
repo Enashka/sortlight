@@ -17,6 +17,7 @@ No image is uploaded. Folder access and file operations stay in the browser on t
 - Tag restoration when the same folder is reopened in the same browser
 - Collision-safe copying with byte-size verification; originals remain untouched
 - Responsive layouts for desktop, laptop, and touch-sized screens
+- Installable app icon and standalone window for the macOS Dock and Ubuntu launcher
 
 ## Browser and operating-system support
 
@@ -25,6 +26,12 @@ The full folder-copying workflow uses the File System Access API and works in cu
 Firefox and Safari can load, preview, and tag a selected folder through the fallback folder input, but they do not currently provide the required browser API for choosing writable destination folders. Copying is therefore disabled in those browsers.
 
 Sortlight reads images from the selected folder's top level. At export time, each tag used in the batch can point to a different folder anywhere the browser is allowed to access, including folders outside the source folder.
+
+## Install as a desktop app
+
+Open Sortlight in desktop Chrome or Chromium and select **Install app** when the button appears. Chrome can also install it from **More → Cast, save and share → Install page as app**. After installation, keep Sortlight in the macOS Dock, or right-click it in Ubuntu and choose **Add to Favorites**.
+
+An installation made from `localhost` still needs the local Sortlight server to be running. Installing the hosted version avoids that requirement; images and folder operations remain local to the computer either way.
 
 ## Local development
 
@@ -61,4 +68,6 @@ npm test
 - `app/image-sorter.tsx` — folder access, review workflow, shortcuts, and safe sorting
 - `app/sorting.ts` — shared destination types and pure sorting helpers
 - `app/globals.css` — responsive visual system
+- `public/manifest.webmanifest` and `public/sw.js` — desktop installation and offline app shell
+- `public/icons/` — Dock, launcher, and browser icons
 - `tests/rendered-html.test.mjs` — production-render and safety regression checks

@@ -1,0 +1,26 @@
+{
+  "id": "/",
+  "name": "Sortlight — Local image sorter",
+  "short_name": "Sortlight",
+  "description": "Review, tag, and sort local images with fast keyboard shortcuts.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#252928",
+  "theme_color": "#252928",
+  "categories": ["photo", "productivity", "utilities"],
+  "icons": [
+    {
+      "src": "/icons/sortlight-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/sortlight-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
