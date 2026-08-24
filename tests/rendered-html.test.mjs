@@ -21,7 +21,8 @@ test("server-renders the Sortlight application shell", async () => {
   assert.match(html, /<title>Sortlight — Local image sorter<\/title>/i);
   assert.match(html, /Image sorter/);
   assert.match(html, /Open image folder/);
-  assert.match(html, /Your images stay on this device/);
+  assert.match(html, /Your images and sessions stay on this device/);
+  assert.match(html, /Load session file/);
   assert.match(html, /rel="manifest" href="\/manifest\.webmanifest"/);
   assert.match(html, /apple-touch-icon/);
   assert.doesNotMatch(html, /Give every image|a place to go/i);
@@ -47,9 +48,10 @@ test("provides an installable desktop web app manifest", async () => {
 });
 
 test("keeps export-time folder selection and local copy safeguards in source", async () => {
-  const [component, sorting] = await Promise.all([
+  const [component, sorting, sessionStorage] = await Promise.all([
     readFile(new URL("../app/image-sorter.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/sorting.ts", import.meta.url), "utf8"),
+    readFile(new URL("../app/session-storage.ts", import.meta.url), "utf8"),
   ]);
   assert.match(component, /showDirectoryPicker/);
   assert.match(component, /webkitdirectory/);
@@ -59,8 +61,14 @@ test("keeps export-time folder selection and local copy safeguards in source", a
   assert.match(component, /Choose one destination per tag/);
   assert.doesNotMatch(component, /Tags, shortcuts & folders/);
   assert.match(component, /buildSortingCsv/);
+  assert.match(component, /putStoredAssignment/);
+  assert.match(component, /Session resumed where you left off/);
+  assert.match(component, /Portable session backup saved/);
   assert.doesNotMatch(component, /removeEntry/);
   assert.match(component, /Originals stay untouched/);
   assert.match(sorting, /Destination 1/);
   assert.doesNotMatch(sorting, /Favorites|To edit|Archive|Rejects/);
+  assert.match(sessionStorage, /indexedDB\.open/);
+  assert.match(sessionStorage, /directoryHandle/);
+  assert.match(sessionStorage, /ASSIGNMENT_STORE/);
 });

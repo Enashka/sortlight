@@ -15,6 +15,9 @@ No image is uploaded. Folder access and file operations stay in the browser on t
 - Shortcut keys toggle a tag on and off; optional auto-advance is off by default
 - All, untagged, and per-tag filters with a thumbnail filmstrip
 - Tag restoration when the same folder is reopened in the same browser
+- Automatic resumable sessions stored locally after every tag change
+- Recent-session list with saved folder access, current image, filter, and fit mode
+- Versioned `.json` session backups for recovery or transfer between macOS and Ubuntu
 - Collision-safe copying with byte-size verification; originals remain untouched
 - Responsive layouts for desktop, laptop, and touch-sized screens
 - Installable app icon and standalone window for the macOS Dock and Ubuntu launcher
@@ -26,6 +29,14 @@ The full folder-copying workflow uses the File System Access API and works in cu
 Firefox and Safari can load, preview, and tag a selected folder through the fallback folder input, but they do not currently provide the required browser API for choosing writable destination folders. Copying is therefore disabled in those browsers.
 
 Sortlight reads images from the selected folder's top level. At export time, each tag used in the batch can point to a different folder anywhere the browser is allowed to access, including folders outside the source folder.
+
+## Resuming and backing up sessions
+
+Every tag change is saved immediately in the browser. Sortlight also checkpoints the current image, active filter, fit mode, tag definitions, and selected folder. After closing and reopening the app, choose the folder under **Recent sessions** to continue. Chrome or Chromium may ask you to approve folder access again.
+
+Use **Session → Save backup** to download a versioned `.json` session file. On another computer, choose **Load session file**, then select the corresponding image folder. Backups identify images by filename, size, and modification date; they do not contain images or absolute filesystem paths.
+
+Browser sessions belong to the exact site address and browser profile that created them. For example, `localhost` and the hosted Sortlight address keep separate session lists. A backup file is the safest way to move work between those addresses, browsers, or computers.
 
 ## Install as a desktop app
 
@@ -61,12 +72,14 @@ npm test
 - A destination folder must be different from the selected source folder.
 - A failed copy reports the failure and leaves the original untouched.
 - Browser-readable formats include JPEG, PNG, GIF, WebP, AVIF, BMP, and SVG. Formats such as HEIC may require conversion before the browser can preview them.
-- Settings and pending tag assignments stay in that browser on that device. They do not sync between computers. Destination folders are chosen for each export batch.
+- Local sessions do not sync automatically between computers. Use a Sortlight session backup to transfer work; destination folders are still chosen separately for each export batch.
 
 ## Project structure
 
 - `app/image-sorter.tsx` — folder access, review workflow, shortcuts, and safe sorting
 - `app/sorting.ts` — shared destination types and pure sorting helpers
+- `app/session-storage.ts` — IndexedDB session metadata and per-image tag assignments
+- `app/session-backup.mjs` — portable session validation, serialization, and filenames
 - `app/globals.css` — responsive visual system
 - `public/manifest.webmanifest` and `public/sw.js` — desktop installation and offline app shell
 - `public/icons/` — Dock, launcher, and browser icons

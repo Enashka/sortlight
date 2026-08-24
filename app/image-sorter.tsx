@@ -20,6 +20,22 @@ import {
 import { pickDirectory, supportsDirectoryPicker } from "./browser-files.mjs";
 import { buildSortingCsv, csvDownloadName } from "./csv-export.mjs";
 import { filmstripRange } from "./filmstrip.mjs";
+import {
+  createSessionBackup,
+  parseSessionBackup,
+  serializeSessionBackup,
+  sessionDownloadName,
+} from "./session-backup.mjs";
+import {
+  findStoredSessionForDirectory,
+  getStoredAssignments,
+  getStoredSession,
+  listStoredSessions,
+  putStoredAssignment,
+  putStoredSession,
+  replaceStoredAssignments,
+  StoredSession,
+} from "./session-storage";
 import { normalizeTagIds, toggledTags } from "./tagging.mjs";
 
 type DirectoryPickerWindow = Window & {
@@ -30,8 +46,8 @@ type DirectoryPickerWindow = Window & {
 };
 
 type PermissionDirectoryHandle = FileSystemDirectoryHandle & {
-  queryPermission(options: { mode: "readwrite" }): Promise<PermissionState>;
-  requestPermission(options: { mode: "readwrite" }): Promise<PermissionState>;
+  queryPermission(options: { mode: "read" | "readwrite" }): Promise<PermissionState>;
+  requestPermission(options: { mode: "read" | "readwrite" }): Promise<PermissionState>;
 };
 
 type IterableDirectoryHandle = FileSystemDirectoryHandle & {
@@ -40,6 +56,16 @@ type IterableDirectoryHandle = FileSystemDirectoryHandle & {
 
 type Filter = "all" | "untagged" | string;
 type Notice = { tone: "success" | "warning" | "error"; text: string } | null;
+type SaveState = "idle" | "saving" | "saved" | "error";
+type SessionBackup = {
+  folderName: string;
+  destinations: Destination[];
+  assignments: Record<string, string[]>;
+  currentImageKey: string | null;
+  filter: string;
+  fitMode: "contain" | "cover";
+  imageCount: number;
+};
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>;
   userChoice: Promise<{ outcome: "accepted" | "dismissed"; platform: string }>;
@@ -97,6 +123,40 @@ function makeDestination(): Destination {
   };
 }
 
+function makeSessionId() {
+  return typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `session-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function assignmentsFromImages(images: SortableImage[]) {
+  return Object.fromEntries(
+    images
+      .filter((image) => image.tagIds.length)
+      .map((image) => [storedImageKey(image), image.tagIds]),
+  );
+}
+
+function savedLegacyAssignments(folderName: string) {
+  try {
+    const currentSavedTags = window.localStorage.getItem(`${TAGS_KEY_PREFIX}${folderName}`);
+    const legacySavedTags = window.localStorage.getItem(`${LEGACY_TAGS_KEY_PREFIX}${folderName}`);
+    return JSON.parse(currentSavedTags ?? legacySavedTags ?? "{}") as Record<
+      string,
+      string | string[]
+    >;
+  } catch {
+    return {};
+  }
+}
+
+function sessionDate(timestamp: number) {
+  return new Date(timestamp).toLocaleString(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  });
+}
+
 async function availableName(directory: FileSystemDirectoryHandle, fileName: string) {
   const dot = fileName.lastIndexOf(".");
   const base = dot > 0 ? fileName.slice(0, dot) : fileName;
@@ -123,6 +183,23 @@ async function ensureWritePermission(directory: FileSystemDirectoryHandle) {
   return (await permissionHandle.requestPermission({ mode: "readwrite" })) === "granted";
 }
 
+async function ensureReadPermission(directory: FileSystemDirectoryHandle) {
+  const permissionHandle = directory as PermissionDirectoryHandle;
+  if (typeof permissionHandle.queryPermission !== "function") return true;
+  if ((await permissionHandle.queryPermission({ mode: "read" })) === "granted") return true;
+  return (await permissionHandle.requestPermission({ mode: "read" })) === "granted";
+}
+
+async function readDirectoryImages(directory: FileSystemDirectoryHandle) {
+  const files: Array<{ file: File; handle: FileSystemFileHandle }> = [];
+  for await (const entry of (directory as IterableDirectoryHandle).values()) {
+    if (entry.kind !== "file") continue;
+    const file = await entry.getFile();
+    if (isImageFile(file)) files.push({ file, handle: entry });
+  }
+  return files;
+}
+
 export function ImageSorter() {
   const [images, setImages] = useState<SortableImage[]>([]);
   const [folderName, setFolderName] = useState("");
@@ -135,18 +212,53 @@ export function ImageSorter() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
+  const [sessionDialogOpen, setSessionDialogOpen] = useState(false);
   const [isSorting, setIsSorting] = useState(false);
   const [notice, setNotice] = useState<Notice>(null);
   const [failedImageIds, setFailedImageIds] = useState<Set<string>>(new Set());
   const [isDragging, setIsDragging] = useState(false);
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
+  const [recentSessions, setRecentSessions] = useState<StoredSession[]>([]);
+  const [pendingBackup, setPendingBackup] = useState<SessionBackup | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const sessionInputRef = useRef<HTMLInputElement>(null);
   const imageStageRef = useRef<HTMLDivElement>(null);
   const currentThumbnailRef = useRef<HTMLButtonElement>(null);
   const objectUrlsRef = useRef<string[]>([]);
+  const sessionCreatedAtRef = useRef(0);
+  const saveGenerationRef = useRef(0);
+
+  const trackSessionWrite = useCallback((operation: Promise<void>) => {
+    const generation = saveGenerationRef.current + 1;
+    saveGenerationRef.current = generation;
+    setSaveState("saving");
+    void operation
+      .then(() => {
+        if (saveGenerationRef.current === generation) setSaveState("saved");
+      })
+      .catch(() => {
+        if (saveGenerationRef.current === generation) setSaveState("error");
+      });
+  }, []);
+
+  const refreshRecentSessions = useCallback(async () => {
+    try {
+      setRecentSessions((await listStoredSessions()).slice(0, 5));
+    } catch {
+      setRecentSessions([]);
+    }
+  }, []);
 
   useEffect(() => {
     return () => objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+  }, []);
+
+  useEffect(() => {
+    void listStoredSessions()
+      .then((sessions) => setRecentSessions(sessions.slice(0, 5)))
+      .catch(() => setRecentSessions([]));
   }, []);
 
   useEffect(() => {
@@ -178,6 +290,7 @@ export function ImageSorter() {
 
   const safeIndex = Math.min(currentIndex, Math.max(visibleImages.length - 1, 0));
   const currentImage = visibleImages[safeIndex];
+  const currentImageKey = currentImage ? storedImageKey(currentImage) : null;
   const visibleFilmstripRange = filmstripRange(visibleImages.length, safeIndex);
   const filmstripImages = visibleImages.slice(
     visibleFilmstripRange.start,
@@ -192,40 +305,24 @@ export function ImageSorter() {
     currentThumbnailRef.current?.scrollIntoView({ block: "nearest" });
   }, [currentImage?.id]);
 
-  const rememberTags = useCallback(
-    (nextImages: SortableImage[]) => {
-      if (!folderName) return;
-      try {
-        const saved = Object.fromEntries(
-          nextImages
-            .filter((image) => image.tagIds.length)
-            .map((image) => [storedImageKey(image), image.tagIds]),
-        );
-        window.localStorage.setItem(`${TAGS_KEY_PREFIX}${folderName}`, JSON.stringify(saved));
-      } catch {
-        // Sorting remains available even if local persistence is blocked.
-      }
-    },
-    [folderName],
-  );
-
   const loadFiles = useCallback(
-    (files: Array<{ file: File; handle?: FileSystemFileHandle }>, sourceName: string) => {
+    async (
+      files: Array<{ file: File; handle?: FileSystemFileHandle }>,
+      sourceName: string,
+      options: {
+        directoryHandle?: FileSystemDirectoryHandle;
+        storedSession?: StoredSession;
+        assignments?: Record<string, string | string[]>;
+        backup?: SessionBackup;
+      } = {},
+    ) => {
       objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
       objectUrlsRef.current = [];
 
-      let savedTags: Record<string, string | string[]> = {};
-      try {
-        const currentSavedTags = window.localStorage.getItem(`${TAGS_KEY_PREFIX}${sourceName}`);
-        const legacySavedTags = window.localStorage.getItem(`${LEGACY_TAGS_KEY_PREFIX}${sourceName}`);
-        savedTags = JSON.parse(currentSavedTags ?? legacySavedTags ?? "{}") as Record<
-          string,
-          string | string[]
-        >;
-      } catch {
-        savedTags = {};
-      }
-      const validTagIds = new Set(destinations.map((destination) => destination.id));
+      const sessionDestinations =
+        options.backup?.destinations ?? options.storedSession?.destinations ?? destinations;
+      const savedTags = options.assignments ?? savedLegacyAssignments(sourceName);
+      const validTagIds = new Set(sessionDestinations.map((destination) => destination.id));
 
       const nextImages = files
         .filter(({ file }) => isImageFile(file))
@@ -250,18 +347,87 @@ export function ImageSorter() {
           return image;
         });
 
+      const requestedFilter = options.backup?.filter ?? options.storedSession?.filter ?? "all";
+      const nextFilter =
+        requestedFilter === "all" ||
+        requestedFilter === "untagged" ||
+        validTagIds.has(requestedFilter)
+          ? requestedFilter
+          : "all";
+      const nextVisibleImages =
+        nextFilter === "all"
+          ? nextImages
+          : nextFilter === "untagged"
+            ? nextImages.filter((image) => !image.tagIds.length)
+            : nextImages.filter((image) => image.tagIds.includes(nextFilter));
+      const requestedImageKey =
+        options.backup?.currentImageKey ?? options.storedSession?.currentImageKey ?? null;
+      const restoredIndex = requestedImageKey
+        ? Math.max(0, nextVisibleImages.findIndex((image) => storedImageKey(image) === requestedImageKey))
+        : 0;
+      const nextSessionId = options.storedSession?.id ?? makeSessionId();
+      const createdAt = options.storedSession?.createdAt ?? Date.now();
+      const nextFitMode = options.backup?.fitMode ?? options.storedSession?.fitMode ?? "contain";
+      const restoredAssignments = assignmentsFromImages(nextImages);
+      const nextTaggedCount = nextImages.filter((image) => image.tagIds.length).length;
+
       setFolderName(sourceName);
+      setSourceDirectoryHandle(options.directoryHandle ?? null);
+      setDestinations(sessionDestinations);
       setImages(nextImages);
-      setCurrentIndex(0);
-      setFilter("all");
+      setCurrentIndex(restoredIndex);
+      setFilter(nextFilter);
+      setFitMode(nextFitMode);
+      setActiveSessionId(nextSessionId);
+      sessionCreatedAtRef.current = createdAt;
       setFailedImageIds(new Set());
-      setNotice(
-        nextImages.length
-          ? null
-          : { tone: "warning", text: "No browser-readable images were found in this folder." },
-      );
+      setPendingBackup(null);
+      const initialSaveGeneration = saveGenerationRef.current + 1;
+      saveGenerationRef.current = initialSaveGeneration;
+      setSaveState("saving");
+
+      try {
+        await replaceStoredAssignments(nextSessionId, restoredAssignments);
+        await putStoredSession({
+          id: nextSessionId,
+          folderName: sourceName,
+          directoryHandle: options.directoryHandle,
+          destinations: sessionDestinations,
+          currentImageKey: nextVisibleImages[restoredIndex]
+            ? storedImageKey(nextVisibleImages[restoredIndex])
+            : null,
+          filter: nextFilter,
+          fitMode: nextFitMode,
+          imageCount: nextImages.length,
+          taggedCount: nextTaggedCount,
+          createdAt,
+          updatedAt: Date.now(),
+        });
+        window.localStorage.setItem(DESTINATIONS_KEY, JSON.stringify(sessionDestinations));
+        window.localStorage.removeItem(`${TAGS_KEY_PREFIX}${sourceName}`);
+        window.localStorage.removeItem(`${LEGACY_TAGS_KEY_PREFIX}${sourceName}`);
+        if (saveGenerationRef.current === initialSaveGeneration) setSaveState("saved");
+        void refreshRecentSessions();
+      } catch {
+        if (saveGenerationRef.current === initialSaveGeneration) setSaveState("error");
+      }
+
+      if (!nextImages.length) {
+        setNotice({ tone: "warning", text: "No browser-readable images were found in this folder." });
+      } else if (options.backup) {
+        setNotice({
+          tone: "success",
+          text: `Session loaded. ${nextTaggedCount} tagged images matched this folder.`,
+        });
+      } else if (options.storedSession) {
+        setNotice({ tone: "success", text: "Session resumed where you left off." });
+      } else if (Object.keys(restoredAssignments).length) {
+        setNotice({ tone: "success", text: "Existing tags were migrated into a resumable session." });
+      } else {
+        setNotice(null);
+      }
     },
-    [destinations],
+    [destinations, refreshRecentSessions],
   );
 
   const openFolder = useCallback(async () => {
@@ -275,14 +441,19 @@ export function ImageSorter() {
         id: "sortlight-source",
         mode: "read",
       });
-      const files: Array<{ file: File; handle: FileSystemFileHandle }> = [];
-      for await (const entry of (directory as IterableDirectoryHandle).values()) {
-        if (entry.kind !== "file") continue;
-        const file = await entry.getFile();
-        if (isImageFile(file)) files.push({ file, handle: entry });
-      }
-      setSourceDirectoryHandle(directory);
-      loadFiles(files, directory.name);
+      const files = await readDirectoryImages(directory);
+      const storedSession = await findStoredSessionForDirectory(directory);
+      const assignments = pendingBackup
+        ? pendingBackup.assignments
+        : storedSession
+          ? await getStoredAssignments(storedSession.id)
+          : undefined;
+      await loadFiles(files, directory.name, {
+        directoryHandle: directory,
+        storedSession,
+        assignments,
+        backup: pendingBackup ?? undefined,
+      });
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
       setNotice({
@@ -290,20 +461,120 @@ export function ImageSorter() {
         text: folderPickerError(error),
       });
     }
-  }, [loadFiles]);
+  }, [loadFiles, pendingBackup]);
 
   const openFallbackFiles = useCallback(
-    (event: ChangeEvent<HTMLInputElement>) => {
+    async (event: ChangeEvent<HTMLInputElement>) => {
       const selected = Array.from(event.target.files ?? []);
       if (!selected.length) return;
       const firstPath = selected[0].webkitRelativePath;
       const sourceName = firstPath.split("/")[0] || "Selected images";
-      setSourceDirectoryHandle(null);
-      loadFiles(selected.map((file) => ({ file })), sourceName);
+      const storedSession = recentSessions.find((session) => session.folderName === sourceName);
+      const assignments = pendingBackup
+        ? pendingBackup.assignments
+        : storedSession
+          ? await getStoredAssignments(storedSession.id)
+          : undefined;
+      await loadFiles(selected.map((file) => ({ file })), sourceName, {
+        storedSession,
+        assignments,
+        backup: pendingBackup ?? undefined,
+      });
       event.target.value = "";
     },
-    [loadFiles],
+    [loadFiles, pendingBackup, recentSessions],
   );
+
+  useEffect(() => {
+    if (!activeSessionId || !images.length) return;
+    const timer = window.setTimeout(() => {
+      trackSessionWrite(putStoredSession({
+        id: activeSessionId,
+        folderName,
+        directoryHandle: sourceDirectoryHandle ?? undefined,
+        destinations,
+        currentImageKey,
+        filter,
+        fitMode,
+        imageCount: images.length,
+        taggedCount,
+        createdAt: sessionCreatedAtRef.current,
+        updatedAt: Date.now(),
+      }));
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [
+    activeSessionId,
+    currentImageKey,
+    destinations,
+    filter,
+    fitMode,
+    folderName,
+    images.length,
+    sourceDirectoryHandle,
+    taggedCount,
+    trackSessionWrite,
+  ]);
+
+  const resumeStoredSession = useCallback(
+    async (sessionId: string) => {
+      try {
+        const storedSession = await getStoredSession(sessionId);
+        if (!storedSession) {
+          setNotice({ tone: "warning", text: "That saved session is no longer available." });
+          void refreshRecentSessions();
+          return;
+        }
+        if (!storedSession.directoryHandle) {
+          setNotice({
+            tone: "warning",
+            text: `Open the ${storedSession.folderName} folder again to resume this session.`,
+          });
+          return;
+        }
+        if (!(await ensureReadPermission(storedSession.directoryHandle))) {
+          setNotice({ tone: "warning", text: "Folder access is needed to resume this session." });
+          return;
+        }
+        const files = await readDirectoryImages(storedSession.directoryHandle);
+        const assignments = await getStoredAssignments(storedSession.id);
+        await loadFiles(files, storedSession.folderName, {
+          directoryHandle: storedSession.directoryHandle,
+          storedSession,
+          assignments,
+        });
+      } catch (error) {
+        setNotice({ tone: "error", text: folderPickerError(error) });
+      }
+    },
+    [loadFiles, refreshRecentSessions],
+  );
+
+  const importSessionFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      const backup = parseSessionBackup(await file.text()) as SessionBackup;
+      objectUrlsRef.current.forEach((url) => URL.revokeObjectURL(url));
+      objectUrlsRef.current = [];
+      setImages([]);
+      setFolderName("");
+      setSourceDirectoryHandle(null);
+      setActiveSessionId(null);
+      setPendingBackup(backup);
+      setSessionDialogOpen(false);
+      setNotice({
+        tone: "success",
+        text: `Session file loaded. Now open the ${backup.folderName} image folder.`,
+      });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "That session file could not be loaded.",
+      });
+    }
+  }, []);
 
   const moveBy = useCallback(
     (amount: number) => {
@@ -325,12 +596,16 @@ export function ImageSorter() {
           : image,
       );
       setImages(nextImages);
-      rememberTags(nextImages);
+      if (activeSessionId) {
+        trackSessionWrite(
+          putStoredAssignment(activeSessionId, storedImageKey(currentImage), nextTagIds),
+        );
+      }
       if (autoAdvance && tagId && nextTagIds.includes(tagId) && safeIndex < visibleImages.length - 1) {
         setCurrentIndex(safeIndex + 1);
       }
     },
-    [autoAdvance, currentImage, images, rememberTags, safeIndex, visibleImages.length],
+    [activeSessionId, autoAdvance, currentImage, images, safeIndex, trackSessionWrite, visibleImages.length],
   );
 
   const toggleFullscreen = useCallback(async () => {
@@ -350,7 +625,8 @@ export function ImageSorter() {
         target?.isContentEditable ||
         settingsOpen ||
         confirmOpen ||
-        helpOpen
+        helpOpen ||
+        sessionDialogOpen
       ) {
         return;
       }
@@ -389,7 +665,7 @@ export function ImageSorter() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [applyTag, confirmOpen, destinations, helpOpen, moveBy, settingsOpen, toggleFullscreen]);
+  }, [applyTag, confirmOpen, destinations, helpOpen, moveBy, sessionDialogOpen, settingsOpen, toggleFullscreen]);
 
   const saveDestinations = (nextDestinations: Destination[]) => {
     const normalized = nextDestinations.map((destination) => ({
@@ -410,13 +686,17 @@ export function ImageSorter() {
       return;
     }
     const destinationIds = new Set(normalized.map((item) => item.id));
+    const nextImages = images.map((image) => ({
+      ...image,
+      tagIds: image.tagIds.filter((tagId) => destinationIds.has(tagId)),
+    }));
     setDestinations(normalized);
-    setImages((items) =>
-      items.map((image) => ({
-        ...image,
-        tagIds: image.tagIds.filter((tagId) => destinationIds.has(tagId)),
-      })),
-    );
+    setImages(nextImages);
+    if (activeSessionId) {
+      trackSessionWrite(
+        replaceStoredAssignments(activeSessionId, assignmentsFromImages(nextImages)),
+      );
+    }
     if (filter !== "all" && filter !== "untagged" && !destinationIds.has(filter)) {
       setFilter("all");
       setCurrentIndex(0);
@@ -486,7 +766,11 @@ export function ImageSorter() {
       (url) => !images.some((image) => completedIds.has(image.id) && image.url === url),
     );
     setImages(nextImages);
-    rememberTags(nextImages);
+    if (activeSessionId) {
+      trackSessionWrite(
+        replaceStoredAssignments(activeSessionId, assignmentsFromImages(nextImages)),
+      );
+    }
     setCurrentIndex(0);
     setConfirmOpen(false);
     setIsSorting(false);
@@ -498,6 +782,27 @@ export function ImageSorter() {
     } else {
       setNotice({ tone: "success", text: `${successfulCopyCount} copies created. Your originals are unchanged.` });
     }
+  };
+
+  const exportSessionBackup = () => {
+    const backup = createSessionBackup({
+      folderName,
+      destinations,
+      images,
+      currentImageKey,
+      filter,
+      fitMode,
+    });
+    const url = URL.createObjectURL(
+      new Blob([serializeSessionBackup(backup)], { type: "application/json;charset=utf-8" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = sessionDownloadName(folderName);
+    link.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 0);
+    setSessionDialogOpen(false);
+    setNotice({ tone: "success", text: "Portable session backup saved." });
   };
 
   const exportCsv = () => {
@@ -546,7 +851,7 @@ export function ImageSorter() {
           const files = Array.from(event.dataTransfer.files);
           if (files.length) {
             setSourceDirectoryHandle(null);
-            loadFiles(files.map((file) => ({ file })), "Dropped images");
+            void loadFiles(files.map((file) => ({ file })), "Dropped images");
           }
         }}
       >
@@ -571,11 +876,32 @@ export function ImageSorter() {
           </p>
           <div className="welcome-actions">
             <button className="primary-button large" type="button" onClick={() => void openFolder()}>
-              <span aria-hidden="true">＋</span> Open image folder
+              <span aria-hidden="true">＋</span> {pendingBackup ? "Open matching folder" : "Open image folder"}
             </button>
-            <p className="browser-note">Folder copying works in desktop Chrome, Chromium, and Edge.</p>
+            <button className="secondary-button load-session-button" type="button" onClick={() => sessionInputRef.current?.click()}>
+              Load session file
+            </button>
           </div>
-          <div className="privacy-note"><span aria-hidden="true">◆</span> Your images stay on this device</div>
+          {pendingBackup && (
+            <div className="pending-session" role="status">
+              <strong>Ready to restore {pendingBackup.folderName}</strong>
+              <span>{Object.keys(pendingBackup.assignments).length} tagged images in the backup</span>
+            </div>
+          )}
+          {!pendingBackup && recentSessions.length > 0 && (
+            <div className="recent-sessions" aria-label="Recent sessions">
+              <p>RECENT SESSIONS</p>
+              {recentSessions.slice(0, 3).map((session) => (
+                <div className="recent-session" key={session.id}>
+                  <button type="button" onClick={() => void resumeStoredSession(session.id)}>
+                    <strong>{session.folderName}</strong>
+                    <span>{session.taggedCount} tagged · {session.imageCount} images · {sessionDate(session.updatedAt)}</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="privacy-note"><span aria-hidden="true">◆</span> Your images and sessions stay on this device</div>
         </section>
 
         <aside className="shortcut-preview" aria-label="Example keyboard shortcuts">
@@ -608,7 +934,14 @@ export function ImageSorter() {
           webkitdirectory=""
           onChange={openFallbackFiles}
         />
-        {notice && <div className={`toast ${notice.tone}`}>{notice.text}</div>}
+        <input
+          ref={sessionInputRef}
+          className="sr-only"
+          type="file"
+          accept=".json,application/json"
+          onChange={importSessionFile}
+        />
+        {notice && <div className={`toast ${notice.tone}`} role="status">{notice.text}<button type="button" onClick={() => setNotice(null)} aria-label="Dismiss">×</button></div>}
         {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
       </main>
     );
@@ -623,12 +956,13 @@ export function ImageSorter() {
         </a>
         <div className="folder-title">
           <strong>{folderName}</strong>
-          <span>{images.length} images · {taggedCount} tagged</span>
+          <span>{images.length} images · {taggedCount} tagged · <i className={`save-status ${saveState}`}>{saveState === "saving" ? "Saving…" : saveState === "error" ? "Save failed" : "Saved locally"}</i></span>
         </div>
         <div className="header-actions">
           <button className="icon-button" type="button" title="Keyboard help" onClick={() => setHelpOpen(true)}>?</button>
           {installPrompt && <button className="secondary-button install-app-button" type="button" onClick={() => void installApp()}>Install app</button>}
           <button className="secondary-button open-folder-button" type="button" onClick={() => void openFolder()}>Open another folder</button>
+          <button className="secondary-button session-button" type="button" onClick={() => setSessionDialogOpen(true)}>Session</button>
           <button className="secondary-button csv-button" type="button" title="Download the complete sorting plan" onClick={exportCsv}>Export CSV</button>
           <button
             className="primary-button"
@@ -806,6 +1140,13 @@ export function ImageSorter() {
         webkitdirectory=""
         onChange={openFallbackFiles}
       />
+      <input
+        ref={sessionInputRef}
+        className="sr-only"
+        type="file"
+        accept=".json,application/json"
+        onChange={importSessionFile}
+      />
 
       {settingsOpen && (
         <SettingsDialog
@@ -825,6 +1166,17 @@ export function ImageSorter() {
         />
       )}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
+      {sessionDialogOpen && (
+        <SessionDialog
+          folderName={folderName}
+          imageCount={images.length}
+          taggedCount={taggedCount}
+          saveState={saveState}
+          onClose={() => setSessionDialogOpen(false)}
+          onSave={exportSessionBackup}
+          onLoad={() => sessionInputRef.current?.click()}
+        />
+      )}
       {notice && (
         <div className={`toast ${notice.tone}`} role="status">
           {notice.text}<button type="button" onClick={() => setNotice(null)} aria-label="Dismiss">×</button>
@@ -878,6 +1230,33 @@ function SettingsDialog({ destinations, onCancel, onSave }: {
       </div>
       <button className="add-destination" type="button" disabled={draft.length >= 9} onClick={() => setDraft((items) => [...items, makeDestination()])}>＋ Add tag <span>{draft.length} / 9</span></button>
       <div className="dialog-actions"><button className="secondary-button" type="button" onClick={onCancel}>Cancel</button><button className="primary-button" type="button" onClick={() => void onSave(draft)}>Save tags</button></div>
+    </DialogFrame>
+  );
+}
+
+function SessionDialog({ folderName, imageCount, taggedCount, saveState, onClose, onSave, onLoad }: {
+  folderName: string;
+  imageCount: number;
+  taggedCount: number;
+  saveState: SaveState;
+  onClose: () => void;
+  onSave: () => void;
+  onLoad: () => void;
+}) {
+  return (
+    <DialogFrame title="Session" subtitle="Continue automatically here, or keep a portable backup." onClose={onClose}>
+      <div className="session-summary">
+        <div><span>Folder</span><strong>{folderName}</strong></div>
+        <div><span>Progress</span><strong>{taggedCount} tagged of {imageCount}</strong></div>
+        <div><span>Local session</span><strong>{saveState === "error" ? "Save failed" : saveState === "saving" ? "Saving…" : "Saved"}</strong></div>
+      </div>
+      <div className="session-explanation">
+        Sortlight resumes this folder automatically in this browser. A session file is useful as a backup or when moving between computers.
+      </div>
+      <div className="dialog-actions">
+        <button className="secondary-button" type="button" onClick={onLoad}>Load session file</button>
+        <button className="primary-button" type="button" onClick={onSave}>Save backup</button>
+      </div>
     </DialogFrame>
   );
 }
