@@ -61,6 +61,8 @@ test("keeps export-time folder selection and local copy safeguards in source", a
   assert.match(component, /Choose one destination per tag/);
   assert.doesNotMatch(component, /Tags, shortcuts & folders/);
   assert.match(component, /buildSortingCsv/);
+  assert.match(component, /findExactDuplicateGroups/);
+  assert.match(component, /Exact duplicates/);
   assert.match(component, /putStoredAssignment/);
   assert.match(component, /trackSessionWrite\(putStoredSession\(\{/);
   assert.doesNotMatch(

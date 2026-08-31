@@ -20,6 +20,7 @@ import {
 } from "./sorting";
 import { pickDirectory, supportsDirectoryPicker } from "./browser-files.mjs";
 import { buildSortingCsv, csvDownloadName } from "./csv-export.mjs";
+import { findExactDuplicateGroups } from "./duplicates.mjs";
 import { filmstripRange } from "./filmstrip.mjs";
 import { imageNumberToIndex } from "./navigation.mjs";
 import {
@@ -59,6 +60,12 @@ type IterableDirectoryHandle = FileSystemDirectoryHandle & {
 type Filter = "all" | "untagged" | string;
 type Notice = { tone: "success" | "warning" | "error"; text: string } | null;
 type SaveState = "idle" | "saving" | "saved" | "error";
+type DuplicateScanState = {
+  status: "idle" | "scanning" | "complete" | "error";
+  processed: number;
+  total: number;
+};
+type DuplicateMatch = { groupNumber: number; groupSize: number };
 type SessionBackup = {
   folderName: string;
   destinations: Destination[];
@@ -77,6 +84,7 @@ const DESTINATIONS_KEY = "sortlight:destinations:v2";
 const AUTO_ADVANCE_KEY = "sortlight:auto-advance:v2";
 const TAGS_KEY_PREFIX = "sortlight:tags:v2:";
 const LEGACY_TAGS_KEY_PREFIX = "sortlight:tags:v1:";
+const DUPLICATES_FILTER = "__sortlight_exact_duplicates__";
 
 function savedDestinations() {
   if (typeof window === "undefined") return DEFAULT_DESTINATIONS;
@@ -224,6 +232,8 @@ export function ImageSorter() {
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [recentSessions, setRecentSessions] = useState<StoredSession[]>([]);
   const [pendingBackup, setPendingBackup] = useState<SessionBackup | null>(null);
+  const [duplicateMatches, setDuplicateMatches] = useState<Map<string, DuplicateMatch>>(new Map());
+  const [duplicateScan, setDuplicateScan] = useState<DuplicateScanState>({ status: "idle", processed: 0, total: 0 });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sessionInputRef = useRef<HTMLInputElement>(null);
   const imageStageRef = useRef<HTMLDivElement>(null);
@@ -231,6 +241,7 @@ export function ImageSorter() {
   const objectUrlsRef = useRef<string[]>([]);
   const sessionCreatedAtRef = useRef(0);
   const saveGenerationRef = useRef(0);
+  const duplicateScanGenerationRef = useRef(0);
 
   const trackSessionWrite = useCallback((operation: Promise<void>) => {
     const generation = saveGenerationRef.current + 1;
@@ -287,8 +298,9 @@ export function ImageSorter() {
   const visibleImages = useMemo(() => {
     if (filter === "all") return images;
     if (filter === "untagged") return images.filter((image) => !image.tagIds.length);
+    if (filter === DUPLICATES_FILTER) return images.filter((image) => duplicateMatches.has(image.id));
     return images.filter((image) => image.tagIds.includes(filter));
-  }, [filter, images]);
+  }, [duplicateMatches, filter, images]);
 
   const safeIndex = Math.min(currentIndex, Math.max(visibleImages.length - 1, 0));
   const currentImage = visibleImages[safeIndex];
@@ -300,6 +312,7 @@ export function ImageSorter() {
   );
   const taggedCount = images.filter((image) => image.tagIds.length).length;
   const untaggedCount = images.length - taggedCount;
+  const duplicateCount = duplicateMatches.size;
   const folderPickerSupported =
     typeof window !== "undefined" && supportsDirectoryPicker(window as DirectoryPickerWindow);
 
@@ -383,6 +396,9 @@ export function ImageSorter() {
       setActiveSessionId(nextSessionId);
       sessionCreatedAtRef.current = createdAt;
       setFailedImageIds(new Set());
+      duplicateScanGenerationRef.current += 1;
+      setDuplicateMatches(new Map());
+      setDuplicateScan({ status: "idle", processed: 0, total: 0 });
       setPendingBackup(null);
       const initialSaveGeneration = saveGenerationRef.current + 1;
       saveGenerationRef.current = initialSaveGeneration;
@@ -601,6 +617,43 @@ export function ImageSorter() {
     setCurrentIndex(nextIndex);
     setNotice(null);
     input?.select();
+  };
+
+  const scanForDuplicates = async () => {
+    const generation = duplicateScanGenerationRef.current + 1;
+    duplicateScanGenerationRef.current = generation;
+    setDuplicateMatches(new Map());
+    setDuplicateScan({ status: "scanning", processed: 0, total: 0 });
+
+    try {
+      const groups = await findExactDuplicateGroups(images, (processed: number, total: number) => {
+        if (duplicateScanGenerationRef.current === generation) {
+          setDuplicateScan({ status: "scanning", processed, total });
+        }
+      });
+      if (duplicateScanGenerationRef.current !== generation) return;
+
+      const matches = new Map<string, DuplicateMatch>();
+      groups.forEach((group: SortableImage[], groupIndex: number) => {
+        group.forEach((image) => {
+          matches.set(image.id, { groupNumber: groupIndex + 1, groupSize: group.length });
+        });
+      });
+      setDuplicateMatches(matches);
+      setDuplicateScan({ status: "complete", processed: matches.size, total: matches.size });
+      setCurrentIndex(0);
+      setFilter(matches.size ? DUPLICATES_FILTER : "all");
+      setNotice(matches.size
+        ? {
+            tone: "success",
+            text: `${matches.size} exact duplicate images found in ${groups.length} ${groups.length === 1 ? "set" : "sets"}.`,
+          }
+        : { tone: "success", text: "No exact duplicate images found." });
+    } catch {
+      if (duplicateScanGenerationRef.current !== generation) return;
+      setDuplicateScan({ status: "error", processed: 0, total: 0 });
+      setNotice({ tone: "error", text: "The duplicate scan could not be completed." });
+    }
   };
 
   const applyTag = useCallback(
@@ -848,6 +901,8 @@ export function ImageSorter() {
       ? "All images"
       : filter === "untagged"
         ? "Untagged"
+        : filter === DUPLICATES_FILTER
+          ? "Exact duplicates"
         : destinations.find((item) => item.id === filter)?.label ?? "Filtered";
 
   if (!images.length) {
@@ -1017,6 +1072,30 @@ export function ImageSorter() {
         >
           <span className="filter-symbol">○</span><span>Untagged</span><b>{untaggedCount}</b>
         </button>
+        <button
+          className={`filter-row${filter === DUPLICATES_FILTER ? " active" : ""}`}
+          type="button"
+          disabled={duplicateScan.status === "scanning"}
+          title="Find files with identical image contents; nothing will be deleted or moved"
+          onClick={() => {
+            if (duplicateScan.status === "complete" && duplicateCount) {
+              setFilter(DUPLICATES_FILTER);
+              setCurrentIndex(0);
+            } else {
+              void scanForDuplicates();
+            }
+          }}
+        >
+          <span className="filter-symbol">▣</span>
+          <span>
+            {duplicateScan.status === "scanning"
+              ? `Checking ${duplicateScan.processed}/${duplicateScan.total || "…"}`
+              : duplicateScan.status === "error"
+                ? "Scan again"
+                : "Exact duplicates"}
+          </span>
+          <b>{duplicateScan.status === "complete" ? duplicateCount : duplicateScan.status === "scanning" ? "…" : "Scan"}</b>
+        </button>
         <div className="sidebar-rule" />
         {destinations.map((destination) => {
           const count = images.filter((image) => image.tagIds.includes(destination.id)).length;
@@ -1111,6 +1190,11 @@ export function ImageSorter() {
                     {destination.label}
                   </span>
                 ))}
+            </div>
+          ) : null}
+          {currentImage && duplicateMatches.has(currentImage.id) ? (
+            <div className="duplicate-badge">
+              Exact duplicate · set {duplicateMatches.get(currentImage.id)?.groupNumber} · {duplicateMatches.get(currentImage.id)?.groupSize} copies
             </div>
           ) : null}
           <button className="stage-arrow previous" type="button" disabled={safeIndex === 0} onClick={() => moveBy(-1)} aria-label="Previous image">‹</button>

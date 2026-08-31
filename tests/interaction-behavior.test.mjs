@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { pickDirectory } from "../app/browser-files.mjs";
 import { buildSortingCsv, csvDownloadName } from "../app/csv-export.mjs";
+import { duplicateCandidateGroups, exactDuplicateGroups } from "../app/duplicates.mjs";
 import { filmstripRange } from "../app/filmstrip.mjs";
 import { imageNumberToIndex } from "../app/navigation.mjs";
 import {
@@ -63,6 +64,23 @@ test("jumps directly to a numbered image in a large folder", () => {
   assert.equal(imageNumberToIndex("5132", 5_132), 5_131);
   assert.equal(imageNumberToIndex("", 5_132), null);
   assert.equal(imageNumberToIndex("5133", 5_132), null);
+});
+
+test("hashes only same-sized candidates and groups exact duplicate contents", () => {
+  const candidates = duplicateCandidateGroups([
+    { id: "a", size: 10 },
+    { id: "b", size: 10 },
+    { id: "c", size: 20 },
+  ]);
+  assert.deepEqual(candidates.map((group) => group.map((item) => item.id)), [["a", "b"]]);
+
+  const duplicates = exactDuplicateGroups([
+    { id: "a", size: 10, fingerprint: "same" },
+    { id: "b", size: 10, fingerprint: "same" },
+    { id: "c", size: 10, fingerprint: "different" },
+    { id: "d", size: 20, fingerprint: "same" },
+  ]);
+  assert.deepEqual(duplicates.map((group) => group.map((item) => item.id)), [["a", "b"]]);
 });
 
 test("exports a spreadsheet-safe CSV for tagged and untagged images", () => {
