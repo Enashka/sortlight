@@ -16,6 +16,7 @@ No image is uploaded. Folder access and file operations stay in the browser on t
 - All, untagged, and per-tag filters with a thumbnail filmstrip
 - Direct image-number navigation for folders with thousands of images
 - Local exact-duplicate detection with a duplicates-only review filter
+- Duplicate cleanup that keeps one chosen copy per set and moves verified extras to a quarantine folder
 - Tag restoration when the same folder is reopened in the same browser
 - Automatic resumable sessions that immediately save the most recently viewed image
 - Recent-session list with saved folder access, current image, filter, and fit mode
@@ -39,6 +40,12 @@ Every tag change is saved immediately in the browser. Sortlight also checkpoints
 Use **Session → Save backup** to download a versioned `.json` session file. On another computer, choose **Load session file**, then select the corresponding image folder. Backups identify images by filename, size, and modification date; they do not contain images or absolute filesystem paths.
 
 Browser sessions belong to the exact site address and browser profile that created them. For example, `localhost` and the hosted Sortlight address keep separate session lists. A backup file is the safest way to move work between those addresses, browsers, or computers.
+
+## Duplicate cleanup
+
+After opening a folder, select **Exact duplicates** in the sidebar to compare image contents locally. Duplicate sets are shown together, with the first file in each set marked as the keeper by default. Review each set and use **Keep this copy** when another file should remain instead.
+
+Choose **Move extras** to select a quarantine folder. Sortlight writes and byte-size-verifies every quarantine copy before removing its corresponding source copy. This cleanup requires Chrome, Chromium, or Edge folder access; no file is removed when its copy or verification fails.
 
 ## Install as a desktop app
 
@@ -68,7 +75,8 @@ npm test
 
 ## Sorting safety and limitations
 
-- Source images are never changed or removed.
+- Normal tag exports never change or remove source images. Duplicate cleanup moves only copies explicitly marked as extras.
+- During duplicate cleanup, each quarantine copy is verified by byte size before its source copy is removed.
 - Every destination copy is checked against the source file's byte size.
 - If a destination already contains the same filename, Sortlight adds ` (2)`, ` (3)`, and so on.
 - A destination folder must be different from the selected source folder.

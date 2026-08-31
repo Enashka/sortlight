@@ -20,7 +20,7 @@ import {
 } from "./sorting";
 import { pickDirectory, supportsDirectoryPicker } from "./browser-files.mjs";
 import { buildSortingCsv, csvDownloadName } from "./csv-export.mjs";
-import { findExactDuplicateGroups } from "./duplicates.mjs";
+import { defaultDuplicateKeepers, findExactDuplicateGroups } from "./duplicates.mjs";
 import { filmstripRange } from "./filmstrip.mjs";
 import { imageNumberToIndex } from "./navigation.mjs";
 import {
@@ -186,6 +186,21 @@ async function availableName(directory: FileSystemDirectoryHandle, fileName: str
   }
 }
 
+async function copyFileVerified(
+  directory: FileSystemDirectoryHandle,
+  sourceFile: File,
+  fileName: string,
+) {
+  const nextName = await availableName(directory, fileName);
+  const nextHandle = await directory.getFileHandle(nextName, { create: true });
+  const writable = await nextHandle.createWritable();
+  await writable.write(sourceFile);
+  await writable.close();
+  const writtenFile = await nextHandle.getFile();
+  if (writtenFile.size !== sourceFile.size) throw new Error("Copy verification failed");
+  return nextName;
+}
+
 async function ensureWritePermission(directory: FileSystemDirectoryHandle) {
   const permissionHandle = directory as PermissionDirectoryHandle;
   if (typeof permissionHandle.queryPermission !== "function") return true;
@@ -233,7 +248,11 @@ export function ImageSorter() {
   const [recentSessions, setRecentSessions] = useState<StoredSession[]>([]);
   const [pendingBackup, setPendingBackup] = useState<SessionBackup | null>(null);
   const [duplicateMatches, setDuplicateMatches] = useState<Map<string, DuplicateMatch>>(new Map());
+  const [duplicateKeepers, setDuplicateKeepers] = useState<Map<number, string>>(new Map());
   const [duplicateScan, setDuplicateScan] = useState<DuplicateScanState>({ status: "idle", processed: 0, total: 0 });
+  const [duplicateCleanupOpen, setDuplicateCleanupOpen] = useState(false);
+  const [isMovingDuplicates, setIsMovingDuplicates] = useState(false);
+  const [duplicateMoveProgress, setDuplicateMoveProgress] = useState({ processed: 0, total: 0 });
   const fileInputRef = useRef<HTMLInputElement>(null);
   const sessionInputRef = useRef<HTMLInputElement>(null);
   const imageStageRef = useRef<HTMLDivElement>(null);
@@ -298,13 +317,26 @@ export function ImageSorter() {
   const visibleImages = useMemo(() => {
     if (filter === "all") return images;
     if (filter === "untagged") return images.filter((image) => !image.tagIds.length);
-    if (filter === DUPLICATES_FILTER) return images.filter((image) => duplicateMatches.has(image.id));
+    if (filter === DUPLICATES_FILTER) {
+      return images
+        .filter((image) => duplicateMatches.has(image.id))
+        .sort((a, b) => {
+          const groupDifference =
+            (duplicateMatches.get(a.id)?.groupNumber ?? 0) -
+            (duplicateMatches.get(b.id)?.groupNumber ?? 0);
+          return groupDifference || a.name.localeCompare(b.name, undefined, { numeric: true });
+        });
+    }
     return images.filter((image) => image.tagIds.includes(filter));
   }, [duplicateMatches, filter, images]);
 
   const safeIndex = Math.min(currentIndex, Math.max(visibleImages.length - 1, 0));
   const currentImage = visibleImages[safeIndex];
   const currentImageKey = currentImage ? storedImageKey(currentImage) : null;
+  const currentDuplicateMatch = currentImage ? duplicateMatches.get(currentImage.id) : undefined;
+  const currentImageIsKeeper = currentDuplicateMatch
+    ? duplicateKeepers.get(currentDuplicateMatch.groupNumber) === currentImage?.id
+    : false;
   const visibleFilmstripRange = filmstripRange(visibleImages.length, safeIndex);
   const filmstripImages = visibleImages.slice(
     visibleFilmstripRange.start,
@@ -313,6 +345,13 @@ export function ImageSorter() {
   const taggedCount = images.filter((image) => image.tagIds.length).length;
   const untaggedCount = images.length - taggedCount;
   const duplicateCount = duplicateMatches.size;
+  const duplicateExtras = useMemo(
+    () => images.filter((image) => {
+      const match = duplicateMatches.get(image.id);
+      return match && duplicateKeepers.get(match.groupNumber) !== image.id;
+    }),
+    [duplicateKeepers, duplicateMatches, images],
+  );
   const folderPickerSupported =
     typeof window !== "undefined" && supportsDirectoryPicker(window as DirectoryPickerWindow);
 
@@ -398,7 +437,9 @@ export function ImageSorter() {
       setFailedImageIds(new Set());
       duplicateScanGenerationRef.current += 1;
       setDuplicateMatches(new Map());
+      setDuplicateKeepers(new Map());
       setDuplicateScan({ status: "idle", processed: 0, total: 0 });
+      setDuplicateCleanupOpen(false);
       setPendingBackup(null);
       const initialSaveGeneration = saveGenerationRef.current + 1;
       saveGenerationRef.current = initialSaveGeneration;
@@ -623,6 +664,7 @@ export function ImageSorter() {
     const generation = duplicateScanGenerationRef.current + 1;
     duplicateScanGenerationRef.current = generation;
     setDuplicateMatches(new Map());
+    setDuplicateKeepers(new Map());
     setDuplicateScan({ status: "scanning", processed: 0, total: 0 });
 
     try {
@@ -640,6 +682,7 @@ export function ImageSorter() {
         });
       });
       setDuplicateMatches(matches);
+      setDuplicateKeepers(defaultDuplicateKeepers(groups));
       setDuplicateScan({ status: "complete", processed: matches.size, total: matches.size });
       setCurrentIndex(0);
       setFilter(matches.size ? DUPLICATES_FILTER : "all");
@@ -654,6 +697,13 @@ export function ImageSorter() {
       setDuplicateScan({ status: "error", processed: 0, total: 0 });
       setNotice({ tone: "error", text: "The duplicate scan could not be completed." });
     }
+  };
+
+  const keepCurrentDuplicate = () => {
+    if (!currentImage || !currentDuplicateMatch) return;
+    setDuplicateKeepers((keepers) =>
+      new Map(keepers).set(currentDuplicateMatch.groupNumber, currentImage.id),
+    );
   };
 
   const applyTag = useCallback(
@@ -696,6 +746,7 @@ export function ImageSorter() {
         settingsOpen ||
         confirmOpen ||
         helpOpen ||
+        duplicateCleanupOpen ||
         sessionDialogOpen
       ) {
         return;
@@ -735,7 +786,7 @@ export function ImageSorter() {
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [applyTag, confirmOpen, destinations, helpOpen, moveBy, sessionDialogOpen, settingsOpen, toggleFullscreen]);
+  }, [applyTag, confirmOpen, destinations, duplicateCleanupOpen, helpOpen, moveBy, sessionDialogOpen, settingsOpen, toggleFullscreen]);
 
   const saveDestinations = (nextDestinations: Destination[]) => {
     const normalized = nextDestinations.map((destination) => ({
@@ -796,13 +847,7 @@ export function ImageSorter() {
           }
           if (!hasPermission) throw new Error("Destination permission was not granted");
           const sourceFile = image.handle ? await image.handle.getFile() : image.file;
-          const nextName = await availableName(directory, image.name);
-          const nextHandle = await directory.getFileHandle(nextName, { create: true });
-          const writable = await nextHandle.createWritable();
-          await writable.write(sourceFile);
-          await writable.close();
-          const writtenFile = await nextHandle.getFile();
-          if (writtenFile.size !== sourceFile.size) throw new Error("Copy verification failed");
+          await copyFileVerified(directory, sourceFile, image.name);
           const successfulTags = successfulTagsByImage.get(image.id) ?? new Set<string>();
           successfulTags.add(tagId);
           successfulTagsByImage.set(image.id, successfulTags);
@@ -851,6 +896,86 @@ export function ImageSorter() {
       });
     } else {
       setNotice({ tone: "success", text: `${successfulCopyCount} copies created. Your originals are unchanged.` });
+    }
+  };
+
+  const moveDuplicateExtras = async (quarantineDirectory: FileSystemDirectoryHandle) => {
+    if (!sourceDirectoryHandle || !duplicateExtras.length) return;
+    setIsMovingDuplicates(true);
+    setDuplicateMoveProgress({ processed: 0, total: duplicateExtras.length });
+    setNotice(null);
+
+    try {
+      if (!await ensureWritePermission(sourceDirectoryHandle)) {
+        throw new Error("Source-folder permission was not granted");
+      }
+      if (!await ensureWritePermission(quarantineDirectory)) {
+        throw new Error("Quarantine-folder permission was not granted");
+      }
+
+      const movedIds = new Set<string>();
+      const failures: string[] = [];
+      for (const image of duplicateExtras) {
+        let copiedName: string | null = null;
+        try {
+          const sourceFile = image.handle ? await image.handle.getFile() : image.file;
+          copiedName = await copyFileVerified(quarantineDirectory, sourceFile, image.name);
+          await sourceDirectoryHandle.removeEntry(image.name);
+          movedIds.add(image.id);
+        } catch {
+          if (copiedName) {
+            try {
+              await quarantineDirectory.removeEntry(copiedName);
+            } catch {
+              // The original remains untouched; a verified quarantine copy may also remain.
+            }
+          }
+          failures.push(image.name);
+        }
+        setDuplicateMoveProgress({
+          processed: movedIds.size + failures.length,
+          total: duplicateExtras.length,
+        });
+      }
+
+      if (movedIds.size) {
+        const nextImages = images.filter((image) => !movedIds.has(image.id));
+        images
+          .filter((image) => movedIds.has(image.id))
+          .forEach((image) => URL.revokeObjectURL(image.url));
+        objectUrlsRef.current = objectUrlsRef.current.filter(
+          (url) => !images.some((image) => movedIds.has(image.id) && image.url === url),
+        );
+        setImages(nextImages);
+        if (activeSessionId) {
+          trackSessionWrite(
+            replaceStoredAssignments(activeSessionId, assignmentsFromImages(nextImages)),
+          );
+        }
+        setDuplicateMatches(new Map());
+        setDuplicateKeepers(new Map());
+        setDuplicateScan({ status: "idle", processed: 0, total: 0 });
+        setFilter("all");
+        setCurrentIndex(0);
+      }
+
+      setDuplicateCleanupOpen(false);
+      setNotice(failures.length
+        ? {
+            tone: "warning",
+            text: `${movedIds.size} moved. ${failures.length} stayed in the source folder because they could not be moved.`,
+          }
+        : {
+            tone: "success",
+            text: `${movedIds.size} duplicate ${movedIds.size === 1 ? "copy" : "copies"} moved to ${quarantineDirectory.name}.`,
+          });
+    } catch (error) {
+      setNotice({
+        tone: "error",
+        text: error instanceof Error ? error.message : "Duplicate cleanup could not be completed.",
+      });
+    } finally {
+      setIsMovingDuplicates(false);
     }
   };
 
@@ -1192,9 +1317,9 @@ export function ImageSorter() {
                 ))}
             </div>
           ) : null}
-          {currentImage && duplicateMatches.has(currentImage.id) ? (
-            <div className="duplicate-badge">
-              Exact duplicate · set {duplicateMatches.get(currentImage.id)?.groupNumber} · {duplicateMatches.get(currentImage.id)?.groupSize} copies
+          {currentImage && currentDuplicateMatch ? (
+            <div className={`duplicate-badge${currentImageIsKeeper ? " keeper" : " extra"}`}>
+              Set {currentDuplicateMatch.groupNumber} · {currentDuplicateMatch.groupSize} copies · {currentImageIsKeeper ? "KEEP" : "MOVE"}
             </div>
           ) : null}
           <button className="stage-arrow previous" type="button" disabled={safeIndex === 0} onClick={() => moveBy(-1)} aria-label="Previous image">‹</button>
@@ -1216,7 +1341,27 @@ export function ImageSorter() {
               </button>
             ))}
           </div>
-          <span className="nav-hint"><kbd>←</kbd><kbd>→</kbd> Navigate</span>
+          {filter === DUPLICATES_FILTER ? (
+            <div className="duplicate-actions">
+              <button
+                className={currentImageIsKeeper ? "selected" : ""}
+                type="button"
+                onClick={keepCurrentDuplicate}
+              >
+                {currentImageIsKeeper ? "Kept copy" : "Keep this copy"}
+              </button>
+              <button
+                type="button"
+                disabled={!duplicateExtras.length || !sourceDirectoryHandle || !folderPickerSupported}
+                title={!sourceDirectoryHandle || !folderPickerSupported ? "Moving requires folder access in Chrome, Chromium, or Edge" : "Move verified extra copies to a folder you choose"}
+                onClick={() => setDuplicateCleanupOpen(true)}
+              >
+                Move {duplicateExtras.length} extras…
+              </button>
+            </div>
+          ) : (
+            <span className="nav-hint"><kbd>←</kbd><kbd>→</kbd> Navigate</span>
+          )}
         </div>
       </section>
 
@@ -1279,6 +1424,16 @@ export function ImageSorter() {
           sourceDirectoryHandle={sourceDirectoryHandle}
           onCancel={() => !isSorting && setConfirmOpen(false)}
           onConfirm={(handles) => void copyImages(handles)}
+        />
+      )}
+      {duplicateCleanupOpen && sourceDirectoryHandle && (
+        <DuplicateCleanupDialog
+          extraCount={duplicateExtras.length}
+          isMoving={isMovingDuplicates}
+          moveProgress={duplicateMoveProgress}
+          sourceDirectoryHandle={sourceDirectoryHandle}
+          onCancel={() => !isMovingDuplicates && setDuplicateCleanupOpen(false)}
+          onConfirm={(directory) => void moveDuplicateExtras(directory)}
         />
       )}
       {helpOpen && <HelpDialog onClose={() => setHelpOpen(false)} />}
@@ -1430,6 +1585,65 @@ function ConfirmDialog({ destinations, images, isSorting, sourceDirectoryHandle,
       {missingFolder && !pickerError && <p className="settings-error">Choose a destination folder for every tag in this batch.</p>}
       <div className="safety-note"><span>✓</span><p><strong>Originals stay untouched</strong>Every copy is verified by file size. Existing names receive a numbered suffix.</p></div>
       <div className="dialog-actions"><button className="secondary-button" type="button" disabled={isSorting} onClick={onCancel}>Keep reviewing</button><button className="primary-button" type="button" disabled={isSorting || missingFolder} onClick={() => onConfirm(draftHandles)}>{isSorting ? "Copying…" : "Export copies"}</button></div>
+    </DialogFrame>
+  );
+}
+
+function DuplicateCleanupDialog({ extraCount, isMoving, moveProgress, sourceDirectoryHandle, onCancel, onConfirm }: {
+  extraCount: number;
+  isMoving: boolean;
+  moveProgress: { processed: number; total: number };
+  sourceDirectoryHandle: FileSystemDirectoryHandle;
+  onCancel: () => void;
+  onConfirm: (directory: FileSystemDirectoryHandle) => void;
+}) {
+  const [quarantineDirectory, setQuarantineDirectory] = useState<FileSystemDirectoryHandle | null>(null);
+  const [pickerError, setPickerError] = useState("");
+
+  const chooseQuarantineFolder = async () => {
+    try {
+      const handle = await pickDirectory(window as DirectoryPickerWindow, {
+        id: "sortlight-duplicate-quarantine",
+        mode: "readwrite",
+      });
+      if (await handle.isSameEntry(sourceDirectoryHandle)) {
+        setPickerError("Choose a quarantine folder different from the source folder.");
+        return;
+      }
+      setQuarantineDirectory(handle);
+      setPickerError("");
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setPickerError(folderPickerError(error));
+    }
+  };
+
+  return (
+    <DialogFrame
+      title={`Move ${extraCount} duplicate ${extraCount === 1 ? "copy" : "copies"}`}
+      subtitle="Each keeper stays in the source folder. Choose where the extra copies should go."
+      onClose={onCancel}
+    >
+      <div className="duplicate-cleanup-summary">
+        <span>Quarantine folder</span>
+        <button
+          className={`folder-picker${quarantineDirectory ? " selected" : ""}`}
+          type="button"
+          disabled={isMoving}
+          onClick={() => void chooseQuarantineFolder()}
+        >
+          <span>{quarantineDirectory?.name ?? "Choose folder"}</span>
+          <b>{quarantineDirectory ? "Change" : "Choose"}</b>
+        </button>
+      </div>
+      {pickerError && <p className="settings-error" role="alert">{pickerError}</p>}
+      <div className="safety-note"><span>✓</span><p><strong>Verified before removal</strong>Sortlight copies each extra image, verifies its byte size, and only then removes the source copy. Existing destination names receive a numbered suffix.</p></div>
+      <div className="dialog-actions">
+        <button className="secondary-button" type="button" disabled={isMoving} onClick={onCancel}>Keep reviewing</button>
+        <button className="primary-button" type="button" disabled={isMoving || !quarantineDirectory} onClick={() => quarantineDirectory && onConfirm(quarantineDirectory)}>
+          {isMoving ? `Moving ${moveProgress.processed} / ${moveProgress.total}` : `Move ${extraCount} extras`}
+        </button>
+      </div>
     </DialogFrame>
   );
 }

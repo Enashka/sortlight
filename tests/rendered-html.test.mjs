@@ -72,7 +72,13 @@ test("keeps export-time folder selection and local copy safeguards in source", a
   );
   assert.match(component, /Session resumed where you left off/);
   assert.match(component, /Portable session backup saved/);
-  assert.doesNotMatch(component, /removeEntry/);
+  const cleanupSource = component.slice(
+    component.indexOf("const moveDuplicateExtras"),
+    component.indexOf("const exportSessionBackup"),
+  );
+  assert.ok(cleanupSource.indexOf("await copyFileVerified") >= 0);
+  assert.ok(cleanupSource.indexOf("await copyFileVerified") < cleanupSource.indexOf("await sourceDirectoryHandle.removeEntry"));
+  assert.doesNotMatch(component, /removeEntry\([^)]*recursive/s);
   assert.match(component, /Originals stay untouched/);
   assert.match(sorting, /Destination 1/);
   assert.doesNotMatch(sorting, /Favorites|To edit|Archive|Rejects/);

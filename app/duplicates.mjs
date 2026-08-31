@@ -19,6 +19,14 @@ export function exactDuplicateGroups(fingerprintedItems) {
   return [...groupsByFingerprint.values()].filter((group) => group.length > 1);
 }
 
+export function defaultDuplicateKeepers(groups) {
+  return new Map(
+    groups
+      .filter((group) => group.length)
+      .map((group, index) => [index + 1, group[0].id]),
+  );
+}
+
 async function sha256(file) {
   const digest = await globalThis.crypto.subtle.digest("SHA-256", await file.arrayBuffer());
   return [...new Uint8Array(digest)]

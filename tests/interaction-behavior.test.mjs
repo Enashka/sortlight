@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { pickDirectory } from "../app/browser-files.mjs";
 import { buildSortingCsv, csvDownloadName } from "../app/csv-export.mjs";
-import { duplicateCandidateGroups, exactDuplicateGroups } from "../app/duplicates.mjs";
+import { defaultDuplicateKeepers, duplicateCandidateGroups, exactDuplicateGroups } from "../app/duplicates.mjs";
 import { filmstripRange } from "../app/filmstrip.mjs";
 import { imageNumberToIndex } from "../app/navigation.mjs";
 import {
@@ -81,6 +81,7 @@ test("hashes only same-sized candidates and groups exact duplicate contents", ()
     { id: "d", size: 20, fingerprint: "same" },
   ]);
   assert.deepEqual(duplicates.map((group) => group.map((item) => item.id)), [["a", "b"]]);
+  assert.deepEqual(defaultDuplicateKeepers(duplicates), new Map([[1, "a"]]));
 });
 
 test("exports a spreadsheet-safe CSV for tagged and untagged images", () => {
