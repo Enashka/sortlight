@@ -62,6 +62,12 @@ test("keeps export-time folder selection and local copy safeguards in source", a
   assert.doesNotMatch(component, /Tags, shortcuts & folders/);
   assert.match(component, /buildSortingCsv/);
   assert.match(component, /putStoredAssignment/);
+  assert.match(component, /trackSessionWrite\(putStoredSession\(\{/);
+  assert.doesNotMatch(
+    component,
+    /window\.setTimeout\(\(\) => \{\s*trackSessionWrite\(putStoredSession\(\{/s,
+    "the currently viewed image must be checkpointed without a debounce",
+  );
   assert.match(component, /Session resumed where you left off/);
   assert.match(component, /Portable session backup saved/);
   assert.doesNotMatch(component, /removeEntry/);

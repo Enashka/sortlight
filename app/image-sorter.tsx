@@ -2,6 +2,7 @@
 
 import {
   ChangeEvent,
+  FormEvent,
   KeyboardEvent as ReactKeyboardEvent,
   useCallback,
   useEffect,
@@ -20,6 +21,7 @@ import {
 import { pickDirectory, supportsDirectoryPicker } from "./browser-files.mjs";
 import { buildSortingCsv, csvDownloadName } from "./csv-export.mjs";
 import { filmstripRange } from "./filmstrip.mjs";
+import { imageNumberToIndex } from "./navigation.mjs";
 import {
   createSessionBackup,
   parseSessionBackup,
@@ -487,22 +489,19 @@ export function ImageSorter() {
 
   useEffect(() => {
     if (!activeSessionId || !images.length) return;
-    const timer = window.setTimeout(() => {
-      trackSessionWrite(putStoredSession({
-        id: activeSessionId,
-        folderName,
-        directoryHandle: sourceDirectoryHandle ?? undefined,
-        destinations,
-        currentImageKey,
-        filter,
-        fitMode,
-        imageCount: images.length,
-        taggedCount,
-        createdAt: sessionCreatedAtRef.current,
-        updatedAt: Date.now(),
-      }));
-    }, 200);
-    return () => window.clearTimeout(timer);
+    trackSessionWrite(putStoredSession({
+      id: activeSessionId,
+      folderName,
+      directoryHandle: sourceDirectoryHandle ?? undefined,
+      destinations,
+      currentImageKey,
+      filter,
+      fitMode,
+      imageCount: images.length,
+      taggedCount,
+      createdAt: sessionCreatedAtRef.current,
+      updatedAt: Date.now(),
+    }));
   }, [
     activeSessionId,
     currentImageKey,
@@ -585,6 +584,24 @@ export function ImageSorter() {
     },
     [visibleImages.length],
   );
+
+  const jumpToImage = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const input = form.elements.namedItem("image-number") as HTMLInputElement | null;
+    const nextIndex = imageNumberToIndex(input?.value ?? "", visibleImages.length);
+    if (nextIndex === null) {
+      setNotice({
+        tone: "warning",
+        text: `Enter an image number from 1 to ${visibleImages.length}.`,
+      });
+      input?.focus();
+      return;
+    }
+    setCurrentIndex(nextIndex);
+    setNotice(null);
+    input?.select();
+  };
 
   const applyTag = useCallback(
     (tagId: string | null) => {
@@ -1050,10 +1067,25 @@ export function ImageSorter() {
             <strong title={currentImage?.name}>{currentImage?.name}</strong>
             <span>{currentImage ? bytesToSize(currentImage.size) : ""}</span>
           </div>
-          <div className="view-controls">
-            <button className={fitMode === "contain" ? "active" : ""} type="button" onClick={() => setFitMode("contain")}>Fit</button>
-            <button className={fitMode === "cover" ? "active" : ""} type="button" onClick={() => setFitMode("cover")}>Fill</button>
-            <button type="button" onClick={() => void toggleFullscreen()} title="Fullscreen (F)">⛶</button>
+          <div className="toolbar-actions">
+            <form className="jump-control" onSubmit={jumpToImage}>
+              <label htmlFor="image-number">Go to</label>
+              <input
+                id="image-number"
+                name="image-number"
+                type="number"
+                min="1"
+                max={visibleImages.length}
+                placeholder={String(safeIndex + 1)}
+                aria-label={`Image number, 1 to ${visibleImages.length}`}
+              />
+              <button type="submit">Go</button>
+            </form>
+            <div className="view-controls">
+              <button className={fitMode === "contain" ? "active" : ""} type="button" onClick={() => setFitMode("contain")}>Fit</button>
+              <button className={fitMode === "cover" ? "active" : ""} type="button" onClick={() => setFitMode("cover")}>Fill</button>
+              <button type="button" onClick={() => void toggleFullscreen()} title="Fullscreen (F)">⛶</button>
+            </div>
           </div>
         </div>
 

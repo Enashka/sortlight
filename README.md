@@ -14,8 +14,9 @@ No image is uploaded. Folder access and file operations stay in the browser on t
 - CSV export of the complete sorting plan, including tagged and untagged images
 - Shortcut keys toggle a tag on and off; optional auto-advance is off by default
 - All, untagged, and per-tag filters with a thumbnail filmstrip
+- Direct image-number navigation for folders with thousands of images
 - Tag restoration when the same folder is reopened in the same browser
-- Automatic resumable sessions stored locally after every tag change
+- Automatic resumable sessions that immediately save the most recently viewed image
 - Recent-session list with saved folder access, current image, filter, and fit mode
 - Versioned `.json` session backups for recovery or transfer between macOS and Ubuntu
 - Collision-safe copying with byte-size verification; originals remain untouched
