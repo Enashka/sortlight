@@ -1,0 +1,23 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "github>Enashka/renovate-config"
+  ],
+  "packageRules": [
+    {
+      "description": "Keep TypeScript below 6.1 until typescript-eslint supports TypeScript 7.",
+      "matchPackageNames": [
+        "typescript"
+      ],
+      "allowedVersions": "<6.1"
+    },
+    {
+      "description": "wrangler and @cloudflare/vite-plugin are pinned exact and move together.",
+      "matchPackageNames": [
+        "wrangler",
+        "@cloudflare/vite-plugin"
+      ],
+      "groupName": "cloudflare tooling"
+    }
+  ]
+}
