@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { register } from "node:module";
 import test from "node:test";
+
+// vinext >= 1.2 builds a worker that imports `cloudflare:workers` (optional tracing).
+// Plain Node cannot load that scheme, so stub it with an empty module for this test.
+const cloudflareStubLoader = `
+export async function resolve(specifier, context, next) {
+  if (specifier.startsWith("cloudflare:")) return { url: "data:text/javascript,export {}", shortCircuit: true };
+  return next(specifier, context);
+}`;
+register(`data:text/javascript,${encodeURIComponent(cloudflareStubLoader)}`);
 
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
